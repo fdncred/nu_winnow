@@ -1,0 +1,35 @@
+[package]
+name = "nu-winnow-parser"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "A fast, lossless parser for the Nushell language built on winnow"
+license = "MIT"
+keywords = ["nushell", "parser", "winnow", "shell", "formatter"]
+categories = ["parser-implementations", "development-tools"]
+
+[dependencies]
+winnow = "1.0.4"
+serde = { version = "1", features = ["derive"], optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false }
+serde_json = "1"
+
+[features]
+default = ["builtin-commands"]
+# Embed the table of Nushell's built-in command names so that multi-word
+# commands such as `str trim` are resolved to a single call head.
+builtin-commands = []
+# Derive `serde::Serialize`/`Deserialize` for the AST (used by `--json` in the example).
+serde = ["dep:serde"]
+
+[[bench]]
+name = "parse"
+harness = false
+
+[[example]]
+name = "parse"
+
+[profile.release]
+debug = 1
