@@ -40,7 +40,7 @@ source: &str
    ▼  lexer::lex(text, base, LexOptions)                        src/lexer.rs
 Vec<Token>  (Item | Pipe | Redirect | Assign | Semicolon | Eol | Comment | Eof)
    │
-   ▼  parser::block::parse_block_tokens                          src/parser/block.rs
+   ▼  parser::block::parse_block(st, Cursor, span)                src/parser/block.rs
 grouping into Pipeline / PipelineElement / RawCommand, comments attached,
 `=` absorbs the rest of the line, redirections and @attributes collected,
 error recovery per statement
@@ -51,10 +51,10 @@ keyword statements (def, let, if, match, ...) or
 env shorthand, assignments, math expressions with precedence, calls & args
    │
    ▼  parser::value::value(st, span, Hint)                       src/parser/value.rs
-one item -> Expr: literals (src/parser/literal.rs), $vars, cell paths,
-ranges, strings, interpolation, lists/tables/records, closures/blocks,
-subexpressions — nested constructs re-lex their interior and recurse into
-parse_block_tokens
+one item -> Expr: literals (literal.rs), strings and interpolation
+(strings.rs), $vars, cell paths and ranges (cellpath.rs), lists/tables/records
+(collections.rs), closures/blocks/subexpressions (value.rs) — nested
+constructs re-lex their interior and recurse into parse_block
    │
    ▼
 ast::Ast { source, block, comments, shebang }                    src/ast/mod.rs
@@ -71,13 +71,17 @@ see chapter 03.
 | `src/lib.rs` | Public entry points `parse`, `parse_with`, `parse_lenient`; re-exports | change the API surface |
 | `src/span.rs` | `Span`, `Spanned<T>`, `LineIndex`, `LineCol` | change position handling |
 | `src/error.rs` | `ErrorKind`, `Diagnostic`, `ParseError`, rendering with source excerpts | add an error kind or improve messages |
-| `src/input.rs` | The winnow stream types `Input` (chars) and `Tokens` (tokens); winnow error-trait impls for `Diagnostic` | change how positions or errors flow through winnow |
+| `src/input.rs` | The winnow stream type `Input` (characters, absolute positions); winnow error-trait impls for `Diagnostic` | change how positions or errors flow through winnow |
 | `src/lexer.rs` | `Token`, `TokenKind`, `LexOptions`, `lex`, `lex_prefix`, `lex_prefix_at`, the item scanner | change what counts as an item or a delimiter |
 | `src/parser/mod.rs` | `ParseConfig`, `Shared`, `St`, `parse_source` | change configuration, scopes, or the top-level driver |
-| `src/parser/block.rs` | Token grouping: `parse_block_tokens`, `pipeline`, `raw_command`, `predeclare`, recovery | change statement boundaries, comments, redirections, attributes |
+| `src/parser/cursor.rs` | `Cursor`: a read position over the items of one command, with `expect_item` / `expect_end` | change how statement parsers walk tokens |
+| `src/parser/block.rs` | Token grouping: `parse_block`, `pipeline`, `raw_command`, pipe continuation, `predeclare`, recovery | change statement boundaries, comments, redirections, attributes |
 | `src/parser/statement.rs` | `parse_command`, `keyword_or_call`, one function per keyword (`def_stmt`, `if_stmt`, ...) | add or change a keyword statement |
-| `src/parser/expr.rs` | `parse_expression`, `math_expression`, `parse_call`, `parse_args`, `resolve_head`, external calls, env shorthand; token-stream helpers | change operators, precedence, argument parsing, command-name resolution |
-| `src/parser/value.rs` | `value` dispatch, `Hint`, strings and interpolation, cell paths, ranges, `brace`, lists/tables/records, closures/blocks/subexpressions | add a value form or change disambiguation |
+| `src/parser/expr.rs` | `parse_expression`, `math_expression`, `parse_call`, `parse_args`, `resolve_head`, external calls, env shorthand | change operators, precedence, argument parsing, command-name resolution |
+| `src/parser/value.rs` | `value` dispatch, `Hint`, `looks_like_value`, `brace` (record/closure/block), closures, blocks, subexpressions | add a value form or change disambiguation |
+| `src/parser/strings.rs` | Quoted and bare strings, the last-quote rule, interpolation | change string syntax |
+| `src/parser/cellpath.rs` | `$` expressions, cell-path members, `is_range_syntax`, ranges | change variables, paths or ranges |
+| `src/parser/collections.rs` | Lists, tables, records | change collection syntax |
 | `src/parser/literal.rs` | Numbers, units, datetimes, binary blobs, escapes, raw strings | change a literal's syntax |
 | `src/parser/signature.rs` | `[params]`, `(params)`, `|params|`, types, `: in -> out` | change signatures or types |
 | `src/parser/pattern.rs` | `match { ... }` blocks and patterns | change match syntax |
@@ -127,8 +131,12 @@ uses: the set of known command names, needed to join multi-word heads such as
   spans; layout can be recovered from the source through the spans.
 * **Zero-copy where cheap.** Bare words, identifiers, comments and un-escaped
   string bodies borrow from the source (`&'a str` / `Cow::Borrowed`).
-* **Winnow idioms.** Streams implement winnow's `Stream`/`Location`, the
-  error type implements `ParserError`, combinators (`dispatch!`, `take_while`,
-  `repeat`, `alt`, `opt`, `verify`) are used where they express the grammar
-  naturally, and hand-written scanners are written *as* winnow parsers
-  (`fn(&mut Input) -> PResult<T>`) so they compose.
+* **Winnow where it pays.** The character level (lexer, literals) is written
+  with winnow: `Input` implements `Stream`/`Location`, the error type
+  implements `ParserError`, and combinators (`dispatch!`, `take_while`,
+  `alt`, `opt`, `verify`) express the grammar. The token level is a plain
+  `Cursor` over items: a statement is a handful of items walked once, and a
+  cursor with `expect_item` reads more clearly than combinators would.
+* **No speculation.** Every choice (range or string? record, closure or
+  block? math or call?) is made by inspecting text before parsing it, so
+  nothing is parsed twice and no recorded state has to be undone.

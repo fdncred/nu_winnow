@@ -1,14 +1,14 @@
 //! Keyword statements and expressions: `def`, `let`, `if`, `match`, ...
 //!
-//! Each parser takes the items of one pipeline element (terminated by `Eof`)
-//! and produces the corresponding [`ExprKind`] variant.
+//! Each parser takes a [`Cursor`] over the items of one pipeline element and
+//! produces the corresponding [`ExprKind`] variant.
 
-use winnow::stream::Stream;
+use std::borrow::Cow;
 
 use crate::ast::{
-    Alias, Attribute, AttributeBlock, Binding, Def, DefFlag, Else, Export, ExportEnv, Expr, ExprKind, Extern, For,
-    Handler, HandlerKind, If, Loop, Match, Module, RedirectTarget, Redirection, Return, Try, Use, UseMember,
-    UseMemberKind, Where, While,
+    Alias, Attribute, AttributeBlock, Binding, Block, Def, DefFlag, Else, Export, ExportEnv, Expr, ExprKind, Extern,
+    For, Handler, HandlerKind, If, ListItem, Loop, Match, Module, RedirectTarget, Redirection, Return, Signature, Try,
+    Use, UseMember, UseMemberKind, Where, While,
 };
 use crate::error::{Diagnostic, ErrorKind};
 use crate::input::{PResult, cut};
@@ -16,10 +16,10 @@ use crate::lexer::{AssignOp, RedirectSource, Token, TokenKind};
 use crate::span::{Span, Spanned};
 
 use super::block::RawCommand;
-use super::expr::{self, at_end, expect_end, expect_item, items, peek_token, toks, with_eof};
+use super::cursor::Cursor;
 use super::signature::{self, definition_name};
-use super::value::{self, Hint, is_identifier};
-use super::{St, block, pattern};
+use super::value::{self, Hint};
+use super::{St, block, cellpath, collections, expr, pattern, strings};
 
 /// Keywords that start a statement and can only appear at the head of a
 /// pipeline (they parse their own `=` and `{}` arguments).
@@ -63,7 +63,7 @@ pub fn is_parser_keyword(name: &str) -> bool {
 }
 
 /// Reject a `def`/`extern`/`alias` name that is a parser keyword.
-fn check_definition_name(name: &Spanned<std::borrow::Cow<'_, str>>, what: &str) -> PResult<()> {
+fn check_definition_name(name: &Spanned<Cow<'_, str>>, what: &str) -> PResult<()> {
     if is_parser_keyword(&name.item) {
         return Err(cut(Diagnostic::message(
             format!("cannot use parser keyword `{}` as {what} name", name.item),
@@ -75,10 +75,9 @@ fn check_definition_name(name: &Spanned<std::borrow::Cow<'_, str>>, what: &str) 
 }
 
 /// Parse a keyword construct or, failing that, a command call.
-pub fn keyword_or_call<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Expr<'a>> {
-    let items_ = items(tokens);
-    let Some(first) = items_.first() else {
-        return Err(cut(Diagnostic::expected("command", expr::end_span(tokens))));
+pub fn keyword_or_call<'a>(st: St<'_, 'a>, c: Cursor<'_>) -> PResult<Expr<'a>> {
+    let Some(first) = c.peek() else {
+        return Err(cut(Diagnostic::expected("command", c.end_span())));
     };
     if first.kind != TokenKind::Item {
         return Err(cut(Diagnostic::expected("command", first.span)));
@@ -87,126 +86,60 @@ pub fn keyword_or_call<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Expr<'a>
     // `if`, `loop`, ... are ordinary commands in Nushell and may be shadowed by
     // a user definition, unlike the statement keywords.
     let head = if !is_statement_keyword(head) && st.is_declared_command(head) { "" } else { head };
-    let ctx: &'static str;
-    let result = match head {
-        "def" => {
-            ctx = "def";
-            def_stmt(st, tokens)
-        }
-        "extern" => {
-            ctx = "extern";
-            extern_stmt(st, tokens)
-        }
-        "let" => {
-            ctx = "let";
-            binding_stmt(st, tokens, BindingKind::Let)
-        }
-        "mut" => {
-            ctx = "mut";
-            binding_stmt(st, tokens, BindingKind::Mut)
-        }
-        "const" => {
-            ctx = "const";
-            binding_stmt(st, tokens, BindingKind::Const)
-        }
-        "for" => {
-            ctx = "for";
-            for_stmt(st, tokens)
-        }
-        "alias" => {
-            ctx = "alias";
-            alias_stmt(st, tokens)
-        }
-        "module" => {
-            ctx = "module";
-            module_stmt(st, tokens)
-        }
-        "use" => {
-            ctx = "use";
-            use_stmt(st, tokens)
-        }
-        "export" => {
-            ctx = "export";
-            export_stmt(st, tokens)
-        }
-        "export-env" => {
-            ctx = "export-env";
-            export_env_stmt(st, tokens)
-        }
-        "if" => {
-            ctx = "if";
-            if_stmt(st, tokens)
-        }
-        "match" => {
-            ctx = "match";
-            match_stmt(st, tokens)
-        }
-        "while" => {
-            ctx = "while";
-            while_stmt(st, tokens)
-        }
-        "loop" => {
-            ctx = "loop";
-            loop_stmt(st, tokens)
-        }
-        "try" => {
-            ctx = "try";
-            try_stmt(st, tokens)
-        }
-        "return" => {
-            ctx = "return";
-            return_stmt(st, tokens)
-        }
-        "break" => {
-            ctx = "break";
-            simple_stmt(st, tokens, ExprKind::Break)
-        }
-        "continue" => {
-            ctx = "continue";
-            simple_stmt(st, tokens, ExprKind::Continue)
-        }
-        "where" => {
-            ctx = "where";
-            where_stmt(st, tokens)
-        }
-        _ => {
-            ctx = "command call";
-            expr::parse_call(st, tokens)
-        }
+    let (ctx, result) = match head {
+        "def" => ("def", def_stmt(st, c)),
+        "extern" => ("extern", extern_stmt(st, c)),
+        "let" => ("let", binding_stmt(st, c, BindingKind::Let)),
+        "mut" => ("mut", binding_stmt(st, c, BindingKind::Mut)),
+        "const" => ("const", binding_stmt(st, c, BindingKind::Const)),
+        "for" => ("for", for_stmt(st, c)),
+        "alias" => ("alias", alias_stmt(st, c)),
+        "module" => ("module", module_stmt(st, c)),
+        "use" => ("use", use_stmt(st, c)),
+        "export" => ("export", export_stmt(st, c)),
+        "export-env" => ("export-env", export_env_stmt(st, c)),
+        "if" => ("if", if_stmt(st, c)),
+        "match" => ("match", match_stmt(st, c)),
+        "while" => ("while", while_stmt(st, c)),
+        "loop" => ("loop", loop_stmt(st, c)),
+        "try" => ("try", try_stmt(st, c)),
+        "return" => ("return", return_stmt(st, c)),
+        "break" => ("break", simple_stmt(c, ExprKind::Break)),
+        "continue" => ("continue", simple_stmt(c, ExprKind::Continue)),
+        "where" => ("where", where_stmt(st, c)),
+        _ => ("command call", expr::parse_call(st, c)),
     };
     result.map_err(|e| e.map(|d| d.with_context(ctx)))
 }
 
 /// Parse one command (a pipeline element) as collected by the block parser.
 pub fn parse_command<'a>(st: St<'_, 'a>, raw: &RawCommand) -> PResult<(Expr<'a>, Option<Redirection<'a>>)> {
-    let expr = if raw.attributes.is_empty() {
-        expr::parse_expression(st, &raw.parts)?
-    } else {
-        let attributes = raw.attributes.iter().map(|a| attribute(st, a)).collect::<PResult<Vec<_>>>()?;
-        let head = items(&raw.parts).first().map(|t| st.tok(t));
-        let item = match head {
-            Some("def" | "extern" | "export") => keyword_or_call(st, &raw.parts)?,
-            Some(_) => {
-                return Err(cut(Diagnostic::expected(
-                    "`def`, `extern` or `export` after attributes",
-                    items(&raw.parts)[0].span,
-                )));
-            }
-            None => {
-                let last = attributes.last().expect("non-empty").span;
-                return Err(cut(Diagnostic::expected("a definition after the attributes", last.past())
-                    .with_help("attributes must be followed by a `def` or `extern`")));
-            }
-        };
-        let span = attributes[0].span.merge(item.span);
-        Expr::new(ExprKind::AttributeBlock(AttributeBlock { attributes, item: Box::new(item) }), span)
+    let expr = match raw.attributes.as_slice() {
+        [] => expr::parse_expression(st, raw.cursor())?,
+        attribute_lines => {
+            let attributes = attribute_lines.iter().map(|a| attribute(st, a)).collect::<PResult<Vec<_>>>()?;
+            let item = match raw.parts.first().map(|t| st.tok(t)) {
+                Some("def" | "extern" | "export") => keyword_or_call(st, raw.cursor())?,
+                Some(_) => {
+                    return Err(cut(Diagnostic::expected(
+                        "`def`, `extern` or `export` after attributes",
+                        raw.parts[0].span,
+                    )));
+                }
+                None => {
+                    let last = attributes.last().map_or(Span::point(raw.end), |a| a.span);
+                    return Err(cut(Diagnostic::expected("a definition after the attributes", last.past())
+                        .with_help("attributes must be followed by a `def` or `extern`")));
+                }
+            };
+            let span = attributes[0].span.merge(item.span);
+            Expr::new(ExprKind::AttributeBlock(AttributeBlock { attributes, item: Box::new(item) }), span)
+        }
     };
     let redirection = build_redirection(st, raw)?;
     if redirection.is_some() && is_redirect_forbidden(&expr) {
-        return Err(cut(Diagnostic::message(
-            "this statement cannot be redirected",
-            raw.redirections.first().map(|(op, _)| op.span).unwrap_or(expr.span),
-        )));
+        let at = raw.redirections.first().map_or(expr.span, |(op, _)| op.span);
+        return Err(cut(Diagnostic::message("this statement cannot be redirected", at)));
     }
     Ok((expr, redirection))
 }
@@ -240,8 +173,7 @@ fn build_redirection<'a>(st: St<'_, 'a>, raw: &RawCommand) -> PResult<Option<Red
             },
             None => RedirectTarget::Pipe { op: *op },
         };
-        let source = op.item.source();
-        out = Some(match (out.take(), source) {
+        out = Some(match (out.take(), op.item.source()) {
             (None, source) => Redirection::Single { source, target },
             (Some(Redirection::Single { source: RedirectSource::Stdout, target: out_t }), RedirectSource::Stderr) => {
                 Redirection::Separate { out: out_t, err: target }
@@ -260,111 +192,98 @@ fn build_redirection<'a>(st: St<'_, 'a>, raw: &RawCommand) -> PResult<Option<Red
 
 /// `@name args`.
 fn attribute<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Attribute<'a>> {
-    let items_ = items(tokens);
-    let first = items_[0];
-    let (head, consumed) = expr::resolve_head(st, items_, "attr ");
+    let end = tokens.last().map_or(0, |t| t.span.end);
+    let mut c = Cursor::new(tokens, end);
+    let first = c.expect_item("attribute")?;
+    let head = expr::resolve_head(st, first, &mut c, "attr ");
     let name_span = Span::new(first.span.start + 1, head.span.end);
-    let args = expr::parse_args(st, &items_[consumed..])?;
-    let span = first.span.merge(items_.last().unwrap().span);
-    Ok(Attribute { span, name: Spanned::new(head.name, name_span), args })
+    let args = expr::parse_args(st, c)?;
+    Ok(Attribute { span: Span::new(first.span.start, end), name: Spanned::new(head.name, name_span), args })
 }
 
 /// The `{ ... }` item that must end a statement, or an error.
-fn block_item<'a>(st: St<'_, 'a>, tok: &Token, what: &'static str) -> PResult<crate::ast::Block<'a>> {
+fn block_item<'a>(st: St<'_, 'a>, tok: &Token, what: &'static str) -> PResult<Block<'a>> {
     if tok.kind != TokenKind::Item || !st.tok(tok).starts_with('{') {
         return Err(cut(Diagnostic::expected(what, tok.span)));
     }
     value::block_body(st, tok.span)
 }
 
-fn def_stmt<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Expr<'a>> {
-    let mut i = toks(st, tokens);
-    let kw = expect_item(&mut i, "def")?;
+fn def_stmt<'a>(st: St<'_, 'a>, mut c: Cursor<'_>) -> PResult<Expr<'a>> {
+    let kw = c.expect_item("def")?;
     let mut flags = Vec::new();
-    while let Some(t) = peek_token(&i).filter(|t| t.kind == TokenKind::Item && st.tok(t).starts_with("--")) {
-        let flag = match st.tok(t) {
+    while let Some(tok) = c.peek().filter(|t| t.kind == TokenKind::Item && st.tok(t).starts_with("--")) {
+        let flag = match st.tok(tok) {
             "--env" => DefFlag::Env,
             "--wrapped" => DefFlag::Wrapped,
             other => {
-                return Err(cut(Diagnostic::message(format!("unknown flag `{other}` for `def`"), t.span)
+                return Err(cut(Diagnostic::message(format!("unknown flag `{other}` for `def`"), tok.span)
                     .with_help("`def` accepts `--env` and `--wrapped`")));
             }
         };
-        flags.push(Spanned::new(flag, t.span));
-        i.next_token();
+        flags.push(Spanned::new(flag, tok.span));
+        c.next();
     }
-    let name_tok = expect_item(&mut i, "command name")?;
-    let name = definition_name(st, name_tok.span)?;
+    let name = definition_name(st, c.expect_item("command name")?.span)?;
     check_definition_name(&name, "command")?;
-    let (mut signature, has_colon) = signature_item(&mut i)?;
-    let rest = items(i.input.peek_finish());
-    let Some((body_tok, type_items)) = rest.split_last() else {
-        return Err(cut(Diagnostic::expected("block", expr::end_span(tokens))));
+    let (mut signature, has_colon) = signature_item(st, &mut c)?;
+    let Some((body_tok, type_items)) = c.rest().split_last() else {
+        return Err(cut(Diagnostic::expected("block", c.end_span())));
     };
     io_types(st, &mut signature, type_items, has_colon)?;
     let body = block_item(st, body_tok, "block")?;
     let span = kw.span.merge(body_tok.span);
-    Ok(Expr::new(ExprKind::Def(Def { keyword: kw.span, flags, name, signature, body }), span))
+    Ok(Expr::new(ExprKind::Def(Def { flags, name, signature, body }), span))
 }
 
 /// The `[...]`/`(...)` signature item, returning whether it ended with `:`.
-fn signature_item<'a>(i: &mut expr::Toks<'_, '_, 'a>) -> PResult<(crate::ast::Signature<'a>, bool)> {
-    let st = i.state;
-    let sig_tok = expect_item(i, "signature")?;
-    let text = st.tok(&sig_tok);
-    if !text.starts_with('[') && !text.starts_with('(') {
-        return Err(cut(Diagnostic::expected("signature like `[param: type]`", sig_tok.span)));
+fn signature_item<'a>(st: St<'_, 'a>, c: &mut Cursor<'_>) -> PResult<(Signature<'a>, bool)> {
+    let tok = c.expect_item("signature")?;
+    let text = st.tok(&tok);
+    if !text.starts_with(['[', '(']) {
+        return Err(cut(Diagnostic::expected("signature like `[param: type]`", tok.span)));
     }
     let (sig_span, has_colon) = match text.strip_suffix(':') {
-        Some(_) => (Span::new(sig_tok.span.start, sig_tok.span.end - 1), true),
-        None => (sig_tok.span, false),
+        Some(_) => (Span::new(tok.span.start, tok.span.end - 1), true),
+        None => (tok.span, false),
     };
     Ok((signature::parse_signature(st, sig_span)?, has_colon))
 }
 
 /// Attach `: in -> out, ...` items (everything between the signature and the body).
-fn io_types<'a>(
-    st: St<'_, 'a>,
-    sig: &mut crate::ast::Signature<'a>,
-    type_items: &[Token],
-    has_colon: bool,
-) -> PResult<()> {
-    let mut type_items = type_items;
-    let mut has_colon = has_colon;
-    if let Some(first) = type_items.first()
-        && st.tok(first) == ":"
-    {
-        if has_colon {
-            return Err(cut(Diagnostic::expected("type", first.span)));
+fn io_types<'a>(st: St<'_, 'a>, sig: &mut Signature<'a>, type_items: &[Token], has_colon: bool) -> PResult<()> {
+    let (has_colon, type_items) = match type_items.split_first() {
+        Some((first, rest)) if st.tok(first) == ":" => {
+            if has_colon {
+                return Err(cut(Diagnostic::expected("type", first.span)));
+            }
+            (true, rest)
         }
-        has_colon = true;
-        type_items = &type_items[1..];
-    }
-    match (has_colon, type_items.first()) {
-        (true, Some(first)) => {
-            let span = first.span.merge(type_items.last().unwrap().span);
+        _ => (has_colon, type_items),
+    };
+    match (has_colon, type_items.first(), type_items.last()) {
+        (true, Some(first), Some(last)) => {
+            let span = first.span.merge(last.span);
             sig.io_types = signature::parse_io_types(st, span)?;
             sig.io_span = Some(span);
             sig.span = sig.span.merge(span);
             Ok(())
         }
-        (true, None) => Err(cut(Diagnostic::expected("input/output types after `:`", sig.span.past()))),
-        (false, Some(first)) => Err(cut(Diagnostic::expected("`:` before the input/output types", first.span))),
-        (false, None) => Ok(()),
+        (true, ..) => Err(cut(Diagnostic::expected("input/output types after `:`", sig.span.past()))),
+        (false, Some(first), _) => Err(cut(Diagnostic::expected("`:` before the input/output types", first.span))),
+        (false, ..) => Ok(()),
     }
 }
 
-fn extern_stmt<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Expr<'a>> {
-    let mut i = toks(st, tokens);
-    let kw = expect_item(&mut i, "extern")?;
-    let name_tok = expect_item(&mut i, "command name")?;
-    let name = definition_name(st, name_tok.span)?;
+fn extern_stmt<'a>(st: St<'_, 'a>, mut c: Cursor<'_>) -> PResult<Expr<'a>> {
+    let kw = c.expect_item("extern")?;
+    let name = definition_name(st, c.expect_item("command name")?.span)?;
     check_definition_name(&name, "command")?;
-    let (mut signature, has_colon) = signature_item(&mut i)?;
-    let rest = items(i.input.peek_finish());
+    let (mut signature, has_colon) = signature_item(st, &mut c)?;
+    let rest = c.rest();
     io_types(st, &mut signature, rest, has_colon)?;
     let span = kw.span.merge(rest.last().map_or(signature.span, |t| t.span));
-    Ok(Expr::new(ExprKind::Extern(Extern { keyword: kw.span, name, signature }), span))
+    Ok(Expr::new(ExprKind::Extern(Extern { name, signature }), span))
 }
 
 #[derive(Clone, Copy)]
@@ -374,213 +293,193 @@ enum BindingKind {
     Const,
 }
 
-fn binding_stmt<'a>(st: St<'_, 'a>, tokens: &[Token], kind: BindingKind) -> PResult<Expr<'a>> {
-    let items_ = items(tokens);
-    let kw = items_[0];
-    let Some(name_tok) = items_.get(1) else {
-        return Err(cut(Diagnostic::expected("variable name", kw.span.past())));
+/// `let`, `mut` and `const`: `KW name[: type] [= value...]`.
+fn binding_stmt<'a>(st: St<'_, 'a>, c: Cursor<'_>, kind: BindingKind) -> PResult<Expr<'a>> {
+    let items = c.all();
+    let kw = items[0];
+    let name_tok = match items.get(1) {
+        Some(tok) if tok.kind == TokenKind::Item => tok,
+        _ => return Err(cut(Diagnostic::expected("variable name", c.slice(1..items.len()).here()))),
     };
-    if name_tok.kind != TokenKind::Item {
-        return Err(cut(Diagnostic::expected("variable name", name_tok.span)));
-    }
-    let name_text = st.tok(name_tok);
-    let name_start = name_tok.span.start + usize::from(name_text.starts_with('$'));
-    let name_text = name_text.strip_prefix('$').unwrap_or(name_text);
-    let (name, typed) = match name_text.strip_suffix(':') {
-        Some(n) => (n, true),
-        None => (name_text, false),
-    };
-    if name.contains([' ', '"', '\'', '`']) || !is_identifier(name) {
-        return Err(cut(Diagnostic::expected("valid variable name", name_tok.span)
-            .with_help("variable names may not contain spaces, quotes or `.[({+-*^%/=!<>&|`")));
-    }
-    let name = Spanned::new(name, Span::new(name_start, name_start + name.len()));
-    let eq_idx = items_.iter().position(|t| matches!(t.kind, TokenKind::Assign(_))).unwrap_or(items_.len());
-    let eq_tok = items_.get(eq_idx).copied();
+    let (name, typed) = variable_declaration(st, name_tok)?;
+    let eq_idx = items.iter().position(|t| matches!(t.kind, TokenKind::Assign(_))).unwrap_or(items.len());
+    let eq_tok = items.get(eq_idx).copied();
     if let Some(eq_tok) = eq_tok
         && eq_tok.kind != TokenKind::Assign(AssignOp::Assign)
     {
         return Err(cut(Diagnostic::expected("`=`", eq_tok.span)));
     }
-    let mut type_items = &items_[2..eq_idx];
-    let mut typed = typed;
-    if let Some(first) = type_items.first()
-        && st.tok(first) == ":"
-    {
-        typed = true;
-        type_items = &type_items[1..];
-    }
-    let ty = match (typed, type_items.first()) {
-        (true, Some(first)) => Some(signature::parse_type(st, first.span.merge(type_items.last().unwrap().span))?),
-        (true, None) => return Err(cut(Diagnostic::expected("type after `:`", name_tok.span.past()))),
-        (false, Some(first)) => return Err(cut(Diagnostic::new(ErrorKind::ExtraTokens, first.span))),
-        (false, None) => None,
-    };
+    let ty = type_after_name(st, &items[2..eq_idx], typed, name_tok.span.past())?;
     let (value, end) = match eq_tok {
         Some(eq_tok) => {
-            let rhs = &tokens[eq_idx + 1..];
-            let rhs_items = items(rhs);
-            if rhs_items.is_empty() {
+            let rhs = c.slice(eq_idx + 1..items.len());
+            let Some(rhs_span) = rhs.span() else {
                 return Err(cut(Diagnostic::expected("value after `=`", eq_tok.span.past())));
-            }
-            let rhs_span = rhs_items[0].span.merge(rhs_items.last().unwrap().span);
-            (Some(block::parse_block_tokens(st, rhs, rhs_span)), rhs_span)
+            };
+            (Some(block::parse_block(st, rhs, rhs_span)), rhs_span)
         }
-        None => (None, items_.last().unwrap().span),
+        None => (None, items[items.len() - 1].span),
     };
-    let binding = Binding { keyword: kw.span, name, ty, eq: eq_tok.map(|t| t.span), value };
-    let span = kw.span.merge(end);
+    let binding = Binding { name, ty, eq: eq_tok.map(|t| t.span), value };
     let kind = match kind {
         BindingKind::Let => ExprKind::Let(binding),
         BindingKind::Mut => ExprKind::Mut(binding),
         BindingKind::Const => ExprKind::Const(binding),
     };
-    Ok(Expr::new(kind, span))
+    Ok(Expr::new(kind, kw.span.merge(end)))
 }
 
-fn for_stmt<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Expr<'a>> {
-    let mut i = toks(st, tokens);
-    let kw = expect_item(&mut i, "for")?;
-    let var_tok = expect_item(&mut i, "loop variable")?;
-    let var_text = st.tok(&var_tok);
-    let name_start = var_tok.span.start + usize::from(var_text.starts_with('$'));
-    let var_text = var_text.strip_prefix('$').unwrap_or(var_text);
-    let (name, typed) = match var_text.strip_suffix(':') {
-        Some(n) => (n, true),
-        None => (var_text, false),
+/// A declared variable name: `x`, `$x`, or `x:` (followed by a type).
+/// Returns the name and whether a type follows.
+fn variable_declaration<'a>(st: St<'_, 'a>, tok: &Token) -> PResult<(Spanned<&'a str>, bool)> {
+    let text = st.tok(tok);
+    let start = tok.span.start + usize::from(text.starts_with('$'));
+    let text = text.strip_prefix('$').unwrap_or(text);
+    let (name, typed) = match text.strip_suffix(':') {
+        Some(name) => (name, true),
+        None => (text, false),
     };
-    if !is_identifier(name) {
-        return Err(cut(Diagnostic::expected("valid variable name", var_tok.span)));
+    if name.contains([' ', '"', '\'', '`']) || !cellpath::is_identifier(name) {
+        return Err(cut(Diagnostic::expected("valid variable name", tok.span)
+            .with_help("variable names may not contain spaces, quotes or `.[({+-*^%/=!<>&|`")));
     }
-    let var = Spanned::new(name, Span::new(name_start, name_start + name.len()));
-    let ty = if typed {
-        let ty_tok = expect_item(&mut i, "type")?;
-        Some(signature::parse_type(st, ty_tok.span)?)
-    } else {
-        None
+    Ok((Spanned::new(name, Span::new(start, start + name.len())), typed))
+}
+
+/// The type annotation items between a declared name and `=`: `x: int`,
+/// `x : int`, `x: record<a: int, b: string>` (several items, re-lexed as one).
+fn type_after_name<'a>(
+    st: St<'_, 'a>,
+    items: &[Token],
+    typed: bool,
+    after_name: Span,
+) -> PResult<Option<crate::ast::TypeAnnotation<'a>>> {
+    let (typed, items) = match items.split_first() {
+        Some((first, rest)) if st.tok(first) == ":" => (true, rest),
+        _ => (typed, items),
     };
-    let in_tok = expect_item(&mut i, "`in`")?;
+    match (typed, items.first(), items.last()) {
+        (true, Some(first), Some(last)) => Ok(Some(signature::parse_type(st, first.span.merge(last.span))?)),
+        (true, ..) => Err(cut(Diagnostic::expected("type after `:`", after_name))),
+        (false, Some(first), _) => Err(cut(Diagnostic::new(ErrorKind::ExtraTokens, first.span))),
+        (false, ..) => Ok(None),
+    }
+}
+
+fn for_stmt<'a>(st: St<'_, 'a>, mut c: Cursor<'_>) -> PResult<Expr<'a>> {
+    let kw = c.expect_item("for")?;
+    let var_tok = c.expect_item("loop variable")?;
+    let (var, typed) = variable_declaration(st, &var_tok)?;
+    let ty = match typed {
+        true => Some(signature::parse_type(st, c.expect_item("type")?.span)?),
+        false => None,
+    };
+    let in_tok = c.expect_item("`in`")?;
     if st.tok(&in_tok) != "in" {
         return Err(cut(Diagnostic::new(ErrorKind::ExpectedKeyword("in"), in_tok.span)));
     }
-    let iter_tok = expect_item(&mut i, "value to iterate")?;
-    let iterable = value::value(st, iter_tok.span, Hint::Any)?;
-    let body_tok = expect_item(&mut i, "block")?;
+    let iterable = value::value(st, c.expect_item("value to iterate")?.span, Hint::Any)?;
+    let body_tok = c.expect_item("block")?;
     let body = block_item(st, &body_tok, "block")?;
-    expect_end(&mut i)?;
+    c.expect_end()?;
     let span = kw.span.merge(body_tok.span);
-    Ok(Expr::new(
-        ExprKind::For(For { keyword: kw.span, var, ty, in_keyword: in_tok.span, iterable: Box::new(iterable), body }),
-        span,
-    ))
+    Ok(Expr::new(ExprKind::For(For { var, ty, in_keyword: in_tok.span, iterable: Box::new(iterable), body }), span))
 }
 
-fn alias_stmt<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Expr<'a>> {
-    let items_ = items(tokens);
-    let kw = items_[0];
-    let Some(name_tok) = items_.get(1).filter(|t| t.kind == TokenKind::Item) else {
-        return Err(cut(Diagnostic::expected("alias name", kw.span.past())));
-    };
-    let name = definition_name(st, name_tok.span)?;
+fn alias_stmt<'a>(st: St<'_, 'a>, mut c: Cursor<'_>) -> PResult<Expr<'a>> {
+    let kw = c.expect_item("alias")?;
+    let name = definition_name(st, c.expect_item("alias name")?.span)?;
     check_definition_name(&name, "alias")?;
-    let Some(eq_tok) = items_.get(2) else {
-        return Err(cut(Diagnostic::expected("`=`", name_tok.span.past())));
+    let eq_tok = match c.next() {
+        Some(tok) if tok.kind == TokenKind::Assign(AssignOp::Assign) => *tok,
+        _ => return Err(cut(Diagnostic::expected("`=`", c.here()))),
     };
-    if eq_tok.kind != TokenKind::Assign(AssignOp::Assign) {
-        return Err(cut(Diagnostic::expected("`=`", eq_tok.span)));
-    }
     // Nushell hands everything after `=` to the expression parser as plain
     // words, so `alias ll = ls | length` is `ls` with the arguments `|` and `length`.
-    let value_tokens: Vec<Token> = tokens[3..]
-        .iter()
-        .map(|t| if t.kind == TokenKind::Eof { *t } else { Token { kind: TokenKind::Item, span: t.span } })
-        .collect();
-    if items(&value_tokens).is_empty() {
+    let words: Vec<Token> = c.rest().iter().map(|t| Token { kind: TokenKind::Item, span: t.span }).collect();
+    if words.is_empty() {
         return Err(cut(Diagnostic::expected("command after `=`", eq_tok.span.past())));
     }
-    let value = expr::parse_expression(st, &value_tokens)?;
+    let value = expr::parse_expression(st, Cursor::new(&words, c.end_span().start))?;
     let span = kw.span.merge(value.span);
-    Ok(Expr::new(ExprKind::Alias(Alias { keyword: kw.span, name, eq: eq_tok.span, value: Box::new(value) }), span))
+    Ok(Expr::new(ExprKind::Alias(Alias { name, eq: eq_tok.span, value: Box::new(value) }), span))
 }
 
-fn module_stmt<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Expr<'a>> {
-    let mut i = toks(st, tokens);
-    let kw = expect_item(&mut i, "module")?;
-    let name_tok = expect_item(&mut i, "module name or path")?;
+fn module_stmt<'a>(st: St<'_, 'a>, mut c: Cursor<'_>) -> PResult<Expr<'a>> {
+    let kw = c.expect_item("module")?;
+    let name_tok = c.expect_item("module name or path")?;
     let name = value::value(st, name_tok.span, Hint::String)?;
-    let body = match peek_token(&i) {
-        Some(t) if t.kind == TokenKind::Item && st.tok(t).starts_with('{') => {
-            let t = *t;
-            i.next_token();
+    let mut end = name_tok.span;
+    let body = match c.peek() {
+        Some(tok) if tok.kind == TokenKind::Item && st.tok(tok).starts_with('{') => {
+            end = tok.span;
+            c.next();
             st.push_scope();
-            let body = value::block_body(st, t.span);
+            let body = value::block_body(st, tok.span);
             st.pop_scope();
             Some(body?)
         }
         _ => None,
     };
-    expect_end(&mut i)?;
-    let end = items(tokens).last().unwrap().span;
-    Ok(Expr::new(ExprKind::Module(Module { keyword: kw.span, name: Box::new(name), body }), kw.span.merge(end)))
+    c.expect_end()?;
+    Ok(Expr::new(ExprKind::Module(Module { name: Box::new(name), body }), kw.span.merge(end)))
 }
 
-fn use_stmt<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Expr<'a>> {
-    let mut i = toks(st, tokens);
-    let kw = expect_item(&mut i, "use")?;
-    let module_tok = expect_item(&mut i, "module name or path")?;
-    let module = if st.tok(&module_tok) == "null" {
-        Expr::new(ExprKind::Nothing, module_tok.span)
-    } else {
-        value::value(st, module_tok.span, Hint::String)?
+fn use_stmt<'a>(st: St<'_, 'a>, mut c: Cursor<'_>) -> PResult<Expr<'a>> {
+    let kw = c.expect_item("use")?;
+    let module_tok = c.expect_item("module name or path")?;
+    let module = match st.tok(&module_tok) {
+        "null" => Expr::new(ExprKind::Nothing, module_tok.span),
+        _ => value::value(st, module_tok.span, Hint::String)?,
     };
     let mut members = Vec::new();
-    while !at_end(&i) {
-        let tok = expect_item(&mut i, "module member")?;
-        if let Some(prev) = members.last()
-            && matches!(prev, UseMember { kind: UseMemberKind::Glob | UseMemberKind::List(_), .. })
+    let mut end = module_tok.span;
+    while let Some(tok) = c.next() {
+        if members
+            .last()
+            .is_some_and(|m: &UseMember<'_>| matches!(m.kind, UseMemberKind::Glob | UseMemberKind::List(_)))
         {
             return Err(cut(Diagnostic::message(
                 "a `*` or `[...]` member can only be at the end of an import pattern",
                 tok.span,
             )));
         }
-        let text = st.tok(&tok);
-        let kind = if text == "*" {
-            UseMemberKind::Glob
-        } else if text.starts_with('[') {
-            let list = value::list_or_table(st, tok.span)?;
-            let ExprKind::List(list_items) = list.kind else {
-                return Err(cut(Diagnostic::expected("list of names", tok.span)));
-            };
-            let mut names = Vec::with_capacity(list_items.len());
-            for item in list_items {
-                match item {
-                    crate::ast::ListItem::Item(Expr { span, kind: ExprKind::String(s) }) => {
-                        names.push(Spanned::new(s.value, span));
-                    }
-                    other => {
-                        return Err(cut(Diagnostic::expected("name", other.span())));
-                    }
-                }
-            }
-            UseMemberKind::List(names)
-        } else {
-            UseMemberKind::Name(value::string_lit(st, tok.span)?.value)
+        let kind = match st.tok(tok) {
+            "*" => UseMemberKind::Glob,
+            text if text.starts_with('[') => UseMemberKind::List(use_member_list(st, tok.span)?),
+            _ => UseMemberKind::Name(strings::string_lit(st, tok.span)?.value),
         };
         members.push(UseMember { span: tok.span, kind });
+        end = tok.span;
     }
-    let end = items(tokens).last().unwrap().span;
-    Ok(Expr::new(ExprKind::Use(Use { keyword: kw.span, module: Box::new(module), members }), kw.span.merge(end)))
+    Ok(Expr::new(ExprKind::Use(Use { module: Box::new(module), members }), kw.span.merge(end)))
 }
 
-fn export_stmt<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Expr<'a>> {
-    let items_ = items(tokens);
-    let kw = items_[0];
-    let Some(next) = items_.get(1).filter(|t| t.kind == TokenKind::Item) else {
-        return Err(cut(Diagnostic::expected(
-            "`def`, `extern`, `alias`, `use`, `module` or `const` after `export`",
-            kw.span.past(),
-        )));
+/// The names in a `use module [a b c]` list.
+fn use_member_list<'a>(st: St<'_, 'a>, span: Span) -> PResult<Vec<Spanned<Cow<'a, str>>>> {
+    let ExprKind::List(items) = collections::list_or_table(st, span)?.kind else {
+        return Err(cut(Diagnostic::expected("list of names", span)));
+    };
+    items
+        .into_iter()
+        .map(|item| match item {
+            ListItem::Item(Expr { span, kind: ExprKind::String(s) }) => Ok(Spanned::new(s.value, span)),
+            other => Err(cut(Diagnostic::expected("name", other.span()))),
+        })
+        .collect()
+}
+
+fn export_stmt<'a>(st: St<'_, 'a>, c: Cursor<'_>) -> PResult<Expr<'a>> {
+    let items = c.all();
+    let kw = items[0];
+    let next = match items.get(1) {
+        Some(tok) if tok.kind == TokenKind::Item => tok,
+        _ => {
+            return Err(cut(Diagnostic::expected(
+                "`def`, `extern`, `alias`, `use`, `module` or `const` after `export`",
+                kw.span.past(),
+            )));
+        }
     };
     match st.tok(next) {
         "def" | "extern" | "alias" | "use" | "module" | "const" => {}
@@ -589,107 +488,91 @@ fn export_stmt<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Expr<'a>> {
                 .with_help("expected `def`, `extern`, `alias`, `use`, `module` or `const`")));
         }
     }
-    let item = keyword_or_call(st, &tokens[1..])?;
+    let item = keyword_or_call(st, c.slice(1..items.len()))?;
     let span = kw.span.merge(item.span);
-    Ok(Expr::new(ExprKind::Export(Export { keyword: kw.span, item: Box::new(item) }), span))
+    Ok(Expr::new(ExprKind::Export(Export { item: Box::new(item) }), span))
 }
 
-fn export_env_stmt<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Expr<'a>> {
-    let mut i = toks(st, tokens);
-    let kw = expect_item(&mut i, "export-env")?;
-    let body_tok = expect_item(&mut i, "block")?;
+fn export_env_stmt<'a>(st: St<'_, 'a>, mut c: Cursor<'_>) -> PResult<Expr<'a>> {
+    let kw = c.expect_item("export-env")?;
+    let body_tok = c.expect_item("block")?;
     let body = block_item(st, &body_tok, "block")?;
-    expect_end(&mut i)?;
-    Ok(Expr::new(ExprKind::ExportEnv(ExportEnv { keyword: kw.span, body }), kw.span.merge(body_tok.span)))
+    c.expect_end()?;
+    Ok(Expr::new(ExprKind::ExportEnv(ExportEnv { body }), kw.span.merge(body_tok.span)))
 }
 
-fn if_stmt<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Expr<'a>> {
-    let items_ = items(tokens);
-    let kw = items_[0];
-    let else_idx = items_.iter().position(|t| t.kind == TokenKind::Item && st.tok(t) == "else");
+/// `if COND... BLOCK [else BLOCK|EXPR]`: the condition is every item before
+/// the block, which is the item before `else` or the last item.
+fn if_stmt<'a>(st: St<'_, 'a>, c: Cursor<'_>) -> PResult<Expr<'a>> {
+    let items = c.all();
+    let kw = items[0];
+    let else_idx = items.iter().position(|t| t.kind == TokenKind::Item && st.tok(t) == "else");
     let block_idx = match else_idx {
         Some(k) if k >= 2 => k - 1,
-        Some(k) => return Err(cut(Diagnostic::expected("condition and block before `else`", items_[k].span))),
-        None => items_.len() - 1,
+        Some(k) => return Err(cut(Diagnostic::expected("condition and block before `else`", items[k].span))),
+        None => items.len() - 1,
     };
     if block_idx < 2 {
-        let at = items_.get(1).map_or(kw.span.past(), |t| t.span);
-        return Err(cut(Diagnostic::expected("condition", at)));
+        return Err(cut(Diagnostic::expected("condition", items.get(1).map_or(kw.span.past(), |t| t.span))));
     }
-    let cond_tokens = with_eof(&items_[1..block_idx]);
-    let condition = expr::math_expression(st, &cond_tokens, false)?;
-    let then_block = block_item(st, &items_[block_idx], "block after the condition")?;
-    let mut span = kw.span.merge(items_[block_idx].span);
+    let condition = expr::math_expression(st, c.slice(1..block_idx), false)?;
+    let then_block = block_item(st, &items[block_idx], "block after the condition")?;
+    let mut span = kw.span.merge(items[block_idx].span);
     let else_branch = match else_idx {
         None => None,
         Some(k) => {
-            let else_tok = items_[k];
-            let rest = &tokens[k + 1..];
-            let rest_items = items(rest);
-            if rest_items.is_empty() {
-                return Err(cut(Diagnostic::expected("block or expression after `else`", else_tok.span.past())));
-            }
-            let body = if rest_items.len() == 1 && st.tok(&rest_items[0]).starts_with('{') {
-                Expr::new(ExprKind::Block(block_item(st, &rest_items[0], "block")?), rest_items[0].span)
-            } else {
-                expr::parse_expression(st, rest)?
+            let else_tok = items[k];
+            let rest = c.slice(k + 1..items.len());
+            let body = match rest.all() {
+                [] => return Err(cut(Diagnostic::expected("block or expression after `else`", else_tok.span.past()))),
+                [only] if st.tok(only).starts_with('{') => {
+                    Expr::new(ExprKind::Block(block_item(st, only, "block")?), only.span)
+                }
+                _ => expr::parse_expression(st, rest)?,
             };
             span = span.merge(body.span);
             Some(Else { keyword: else_tok.span, body: Box::new(body) })
         }
     };
-    Ok(Expr::new(ExprKind::If(If { keyword: kw.span, condition: Box::new(condition), then_block, else_branch }), span))
+    Ok(Expr::new(ExprKind::If(If { condition: Box::new(condition), then_block, else_branch }), span))
 }
 
-fn match_stmt<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Expr<'a>> {
-    let mut i = toks(st, tokens);
-    let kw = expect_item(&mut i, "match")?;
-    let value_tok = expect_item(&mut i, "value to match on")?;
-    let value = value::value(st, value_tok.span, Hint::Any)?;
-    let block_tok = expect_item(&mut i, "match block")?;
+fn match_stmt<'a>(st: St<'_, 'a>, mut c: Cursor<'_>) -> PResult<Expr<'a>> {
+    let kw = c.expect_item("match")?;
+    let value = value::value(st, c.expect_item("value to match on")?.span, Hint::Any)?;
+    let block_tok = c.expect_item("match block")?;
     let (block_span, arms) = pattern::match_block(st, block_tok.span)?;
-    expect_end(&mut i)?;
-    Ok(Expr::new(
-        ExprKind::Match(Match { keyword: kw.span, value: Box::new(value), block_span, arms }),
-        kw.span.merge(block_tok.span),
-    ))
+    c.expect_end()?;
+    Ok(Expr::new(ExprKind::Match(Match { value: Box::new(value), block_span, arms }), kw.span.merge(block_tok.span)))
 }
 
-fn while_stmt<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Expr<'a>> {
-    let items_ = items(tokens);
-    let kw = items_[0];
-    if items_.len() < 3 {
-        let at = items_.get(1).map_or(kw.span.past(), |t| t.span.past());
-        return Err(cut(Diagnostic::expected("condition and block", at)));
-    }
-    let block_tok = items_[items_.len() - 1];
-    let cond_tokens = with_eof(&items_[1..items_.len() - 1]);
-    let condition = expr::math_expression(st, &cond_tokens, false)?;
-    let body = block_item(st, &block_tok, "block")?;
-    Ok(Expr::new(
-        ExprKind::While(While { keyword: kw.span, condition: Box::new(condition), body }),
-        kw.span.merge(block_tok.span),
-    ))
+fn while_stmt<'a>(st: St<'_, 'a>, c: Cursor<'_>) -> PResult<Expr<'a>> {
+    let items = c.all();
+    let kw = items[0];
+    let Some((block_tok, _)) = items.split_last().filter(|_| items.len() >= 3) else {
+        return Err(cut(Diagnostic::expected("condition and block", c.slice(1..items.len()).end_span())));
+    };
+    let condition = expr::math_expression(st, c.slice(1..items.len() - 1), false)?;
+    let body = block_item(st, block_tok, "block")?;
+    Ok(Expr::new(ExprKind::While(While { condition: Box::new(condition), body }), kw.span.merge(block_tok.span)))
 }
 
-fn loop_stmt<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Expr<'a>> {
-    let mut i = toks(st, tokens);
-    let kw = expect_item(&mut i, "loop")?;
-    let body_tok = expect_item(&mut i, "block")?;
+fn loop_stmt<'a>(st: St<'_, 'a>, mut c: Cursor<'_>) -> PResult<Expr<'a>> {
+    let kw = c.expect_item("loop")?;
+    let body_tok = c.expect_item("block")?;
     let body = block_item(st, &body_tok, "block")?;
-    expect_end(&mut i)?;
-    Ok(Expr::new(ExprKind::Loop(Loop { keyword: kw.span, body }), kw.span.merge(body_tok.span)))
+    c.expect_end()?;
+    Ok(Expr::new(ExprKind::Loop(Loop { body }), kw.span.merge(body_tok.span)))
 }
 
-fn try_stmt<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Expr<'a>> {
-    let mut i = toks(st, tokens);
-    let kw = expect_item(&mut i, "try")?;
-    let body_tok = expect_item(&mut i, "block")?;
+fn try_stmt<'a>(st: St<'_, 'a>, mut c: Cursor<'_>) -> PResult<Expr<'a>> {
+    let kw = c.expect_item("try")?;
+    let body_tok = c.expect_item("block")?;
     let body = block_item(st, &body_tok, "block")?;
     let mut end = body_tok.span;
     let mut handlers = Vec::new();
-    while !at_end(&i) {
-        let kw_tok = expect_item(&mut i, "`catch` or `finally`")?;
+    while !c.at_end() {
+        let kw_tok = c.expect_item("`catch` or `finally`")?;
         let kind = match st.tok(&kw_tok) {
             "catch" => HandlerKind::Catch,
             "finally" => HandlerKind::Finally,
@@ -699,48 +582,39 @@ fn try_stmt<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Expr<'a>> {
             return Err(cut(Diagnostic::new(ErrorKind::ExtraTokens, kw_tok.span)
                 .with_help("`try` takes at most two handlers (`catch` and `finally`)")));
         }
-        let handler_tok = expect_item(&mut i, "closure")?;
+        let handler_tok = c.expect_item("closure")?;
         let handler = value::value(st, handler_tok.span, Hint::Closure)?;
         end = handler_tok.span;
         handlers.push(Handler { kind, keyword: kw_tok.span, body: Box::new(handler) });
     }
-    Ok(Expr::new(ExprKind::Try(Try { keyword: kw.span, body, handlers }), kw.span.merge(end)))
+    Ok(Expr::new(ExprKind::Try(Try { body, handlers }), kw.span.merge(end)))
 }
 
-fn return_stmt<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Expr<'a>> {
-    let mut i = toks(st, tokens);
-    let kw = expect_item(&mut i, "return")?;
-    let value = if at_end(&i) {
-        None
-    } else {
-        let tok = expect_item(&mut i, "value")?;
-        Some(Box::new(value::value(st, tok.span, Hint::Any)?))
+fn return_stmt<'a>(st: St<'_, 'a>, mut c: Cursor<'_>) -> PResult<Expr<'a>> {
+    let kw = c.expect_item("return")?;
+    let value = match c.at_end() {
+        true => None,
+        false => Some(Box::new(value::value(st, c.expect_item("value")?.span, Hint::Any)?)),
     };
-    expect_end(&mut i)?;
+    c.expect_end()?;
     let span = value.as_ref().map_or(kw.span, |v| kw.span.merge(v.span));
-    Ok(Expr::new(ExprKind::Return(Return { keyword: kw.span, value }), span))
+    Ok(Expr::new(ExprKind::Return(Return { value }), span))
 }
 
-fn simple_stmt<'a>(st: St<'_, 'a>, tokens: &[Token], kind: ExprKind<'a>) -> PResult<Expr<'a>> {
-    let mut i = toks(st, tokens);
-    let kw = expect_item(&mut i, "keyword")?;
-    expect_end(&mut i)?;
+fn simple_stmt<'a>(mut c: Cursor<'_>, kind: ExprKind<'a>) -> PResult<Expr<'a>> {
+    let kw = c.expect_item("keyword")?;
+    c.expect_end()?;
     Ok(Expr::new(kind, kw.span))
 }
 
-fn where_stmt<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Expr<'a>> {
-    let items_ = items(tokens);
-    let kw = items_[0];
-    let rest = &tokens[1..];
-    let rest_items = items(rest);
-    if rest_items.is_empty() {
-        return Err(cut(Diagnostic::expected("row condition or closure", kw.span.past())));
-    }
-    let condition = if rest_items.len() == 1 && st.tok(&rest_items[0]).starts_with('{') {
-        value::closure(st, rest_items[0].span)?
-    } else {
-        expr::math_expression(st, rest, true)?
+/// `where {closure}` or `where ROW-CONDITION...`.
+fn where_stmt<'a>(st: St<'_, 'a>, mut c: Cursor<'_>) -> PResult<Expr<'a>> {
+    let kw = c.expect_item("where")?;
+    let condition = match c.rest() {
+        [] => return Err(cut(Diagnostic::expected("row condition or closure", kw.span.past()))),
+        [only] if st.tok(only).starts_with('{') => value::closure(st, only.span)?,
+        _ => expr::math_expression(st, c.remaining(), true)?,
     };
     let span = kw.span.merge(condition.span);
-    Ok(Expr::new(ExprKind::Where(Where { keyword: kw.span, condition: Box::new(condition) }), span))
+    Ok(Expr::new(ExprKind::Where(Where { condition: Box::new(condition) }), span))
 }

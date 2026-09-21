@@ -5,11 +5,15 @@ Files: `src/ast/mod.rs`, `src/ast/visit.rs`, `src/flatten.rs`, `src/pretty.rs`.
 ## Principles
 
 * **A span on every node.** `Expr { span, kind }`, and every struct inside
-  `ExprKind` records the spans of its keywords, operators and punctuation that
-  a formatter might want to reproduce (`Binding::keyword`, `Binding::eq`,
-  `If::keyword`, `Else::keyword`, `MatchArm::arrow`, `Range::op_span`, ...).
-  Spans are absolute byte offsets into `Ast::source`; `Span::slice(source)`
-  gives the original text of any node.
+  `ExprKind` records the spans of the operators and punctuation that a
+  formatter might want to reproduce (`Binding::eq`, `Else::keyword`,
+  `For::in_keyword`, `MatchArm::arrow`, `Range::op_span`, ...). Spans are
+  absolute byte offsets into `Ast::source`; `Span::slice(source)` gives the
+  original text of any node.
+* **Nothing derivable is stored.** The keyword that starts a statement is
+  always the first word of its span, so there is no `keyword` field:
+  `ExprKind::keyword()` names it (`Some("let")`) and `Expr::keyword_span()`
+  locates it. Consumers that need the span of `let` or `while` use those.
 * **Nushell's shape.** A `Block` is a list of `Pipeline`s; a pipeline is a
   list of `PipelineElement`s; keywords are `ExprKind` variants. This mirrors
   `nu-protocol` so an engine can lower the tree mechanically (the bridge in

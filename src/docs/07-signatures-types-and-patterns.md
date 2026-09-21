@@ -85,7 +85,7 @@ pattern ( "|" pattern )*  [ "if" guard-items... ]  "=>"  body
 ```
 
 * The guard is every item up to `=>`, parsed with `math_expression`.
-* The body is **one item**: a `{ ... }` is parsed with `Hint::Block` (so it is
+* The body is **one item**: a `{ ... }` is parsed with `Hint::MatchBody` (so it is
   a block, or a record if it looks like one, or a closure if it starts with
   `|`), anything else with `parse_expression` — which means `=> print hi`
   makes `hi` the next pattern, exactly as in nu.

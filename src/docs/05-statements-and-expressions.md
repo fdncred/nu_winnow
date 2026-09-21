@@ -2,23 +2,28 @@
 
 Files: `src/parser/statement.rs`, `src/parser/expr.rs`.
 
-The input to this layer is the item list of one command (`RawCommand::parts`,
-ending with `Eof`). The output is one `Expr`.
+The input to this layer is a `Cursor` over the items of one command
+(`RawCommand::cursor()`). The output is one `Expr`.
 
 ## Dispatch order (`expr::parse_expression`)
 
 ```rust,ignore
-pub fn parse_expression<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Expr<'a>> {
+pub fn parse_expression<'a>(st: St<'_, 'a>, mut c: Cursor<'_>) -> PResult<Expr<'a>> {
     // 1. Statement keywords parse their own `=` and `{}` arguments.
-    if is_statement_keyword(first_text) { return statement::keyword_or_call(st, tokens); }
+    if is_statement_keyword(first_text) { return statement::keyword_or_call(st, c); }
     // 2. `NAME=value` prefixes.
-    let (vars, consumed) = env_shorthand_prefix(st, items)?;
+    let vars = env_shorthand_prefix(st, &mut c)?;
     // 3. Any assignment operator among the items -> assignment.
-    if items.iter().any(|t| matches!(t.kind, TokenKind::Assign(_))) { return assignment(st, tokens); }
+    let inner = if c.rest().iter().any(|t| matches!(t.kind, TokenKind::Assign(_))) {
+        assignment(st, c.remaining())?
     // 4. A first item that looks like a value -> math expression.
-    if value::looks_like_value(st, first.span) { return math_expression(st, tokens, false); }
+    } else if looks_like_value(st.tok(first)) {
+        math_expression(st, c.remaining(), false)?
     // 5. Otherwise a keyword expression (if, match, ...) or a call.
-    statement::keyword_or_call(st, tokens)
+    } else {
+        statement::keyword_or_call(st, c.remaining())?
+    };
+    /* wrap `inner` in EnvShorthand if `vars` is not empty */
 }
 ```
 
@@ -27,9 +32,10 @@ easy to miss:
 
 * `looks_like_value` is nu's `is_math_expression_like`: true for `true`,
   `false`, `null`, `not`, `if`, `match`, items starting with `( { [ $ " ' -`
-  or `r#`, and items that parse as a number, unit, datetime, binary or range.
-  So `-1 | math abs` is math, `"ls"` is a string not a call, and `1 + 1` at a
-  pipeline head is arithmetic.
+  or `r#`, and items whose text is a number, unit, datetime, binary or range.
+  It is a pure function of the text (`value.rs`), so `-1 | math abs` is math,
+  `"ls"` is a string not a call, and `1 + 1` at a pipeline head is
+  arithmetic, all without parsing anything twice.
 * Statement keywords (`def`, `let`, `mut`, `const`, `for`, `alias`, `module`,
   `use`, `export`, `export-env`, `extern`) are checked *before* the assignment
   test because `let x = 1` contains an `Assign` token.
@@ -37,23 +43,24 @@ easy to miss:
 ## Keyword forms (`statement.rs`)
 
 `keyword_or_call` matches the head text and calls one function per keyword;
-anything else is a call. Each keyword function follows the same pattern:
-wrap the items in a `Toks` stream, consume with `expect_item`, delegate items
-to `value::value` with the right `Hint`, and finish with `expect_end`.
+anything else is a call. The match also attaches the grammar context
+(`while parsing for`) to any error. Each keyword function follows the same
+pattern: consume items with `expect_item`, delegate items to `value::value`
+with the right `Hint` (or to `block_body` for a block), and finish with
+`expect_end`.
 
 ```rust,ignore
-fn for_stmt<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Expr<'a>> {
-    let mut i = toks(st, tokens);
-    let kw = expect_item(&mut i, "for")?;
-    let var_tok = expect_item(&mut i, "loop variable")?;          // `x`, `$x` or `x:` (typed)
-    /* ... optional type ... */
-    let in_tok = expect_item(&mut i, "`in`")?;
+fn for_stmt<'a>(st: St<'_, 'a>, mut c: Cursor<'_>) -> PResult<Expr<'a>> {
+    let kw = c.expect_item("for")?;
+    let var_tok = c.expect_item("loop variable")?;               // `x`, `$x` or `x:` (typed)
+    let (var, typed) = variable_declaration(st, &var_tok)?;
+    let ty = match typed { true => Some(signature::parse_type(st, c.expect_item("type")?.span)?), false => None };
+    let in_tok = c.expect_item("`in`")?;
     if st.tok(&in_tok) != "in" { return Err(cut(Diagnostic::new(ErrorKind::ExpectedKeyword("in"), in_tok.span))); }
-    let iter_tok = expect_item(&mut i, "value to iterate")?;
-    let iterable = value::value(st, iter_tok.span, Hint::Any)?;
-    let body_tok = expect_item(&mut i, "block")?;
+    let iterable = value::value(st, c.expect_item("value to iterate")?.span, Hint::Any)?;
+    let body_tok = c.expect_item("block")?;
     let body = block_item(st, &body_tok, "block")?;               // must start with `{`
-    expect_end(&mut i)?;
+    c.expect_end()?;
     Ok(Expr::new(ExprKind::For(For { .. }), kw.span.merge(body_tok.span)))
 }
 ```
@@ -85,33 +92,41 @@ whitespace-delimited items; "rest" means everything to the end of the line
 How the extent of a multi-item argument is found deserves a note. nu-parser
 computes it from the signature ("the condition of `if` gets all spans up to
 the ones needed by the remaining required positionals"). Here that rule is
-written out per keyword: the `if` condition is `items[1..block_index]` where
-`block_index` is the index before `else` or the last index. This is the same
-result without needing signatures.
+written out per keyword: the `if` condition is `c.slice(1..block_index)`
+where `block_index` is the index before `else` or the last index. This is
+the same result without needing signatures.
+
+The keyword itself is not stored in the tree: `ExprKind::keyword()` names it
+and `Expr::keyword_span()` locates it, since it is always the first word of
+the expression's span (chapter 08).
 
 ## Math expressions (`expr::math_expression`)
 
 Operands are single items parsed with `value(.., Hint::Any)`; operators are
 items whose text is an operator spelling. The algorithm is nu-parser's
 expression stack, kept identical so that precedence and associativity cannot
-drift:
+drift: operands and operators are pushed onto two stacks, and whenever an
+operator binds no tighter than the previous one, the top of the stacks is
+folded into a `BinaryOp` first:
 
 ```rust,ignore
-let mut stack = vec![Stacked::Expr(lhs)];
+let mut exprs = vec![lhs];
+let mut ops = Vec::new();
 let mut last_prec = u8::MAX;
-while !at_end(&i) {
-    let op = operator(st, &expect_item(&mut i, "operator")?)?;
-    let rhs = operand(&mut i)?;                                // `not`* value
-    let left_assoc = !op.item.is_right_associative() && op.item.precedence() <= last_prec;
-    while left_assoc && stack.len() > 1 {
-        // pop rhs2, op2; if op2 binds looser than op, push them back and stop
-        // else pop lhs2 and push BinaryOp(lhs2, op2, rhs2)
+while !c.at_end() {
+    let op = operator(st, &c.expect_item("operator")?)?;
+    let rhs = operand(st, &mut c)?;                          // `not`* value
+    let prec = op.item.precedence();
+    if !op.item.is_right_associative() && prec <= last_prec {
+        while ops.last().is_some_and(|prev| prev.item.precedence() >= prec) {
+            fold_top(st, &mut exprs, &mut ops, row)?;         // exprs: [.., a, b] ops: [.., op]  ->  exprs: [.., a op b]
+        }
     }
-    stack.push(Stacked::Op(op));
-    stack.push(Stacked::Expr(rhs));
-    last_prec = op.item.precedence();
+    last_prec = prec;
+    ops.push(op);
+    exprs.push(rhs);
 }
-// fold the remainder right to left
+while !ops.is_empty() { fold_top(st, &mut exprs, &mut ops, row)?; }
 ```
 
 Precedence lives on `ast::Operator::precedence` (100 for `**` down to 40 for
@@ -143,9 +158,9 @@ in nu-parser's `expand_to_cell_path`.
 
 `assignment` splits the items at the first `Assign` token. The left side must
 parse to a `Var` or a `FullCellPath` on a `Var`; the right side (everything
-absorbed to the end of the line) is parsed with `parse_block_tokens` and
-stored as a `Block`, matching nu, where `$x = ls | length` assigns the
-pipeline's result.
+absorbed to the end of the line) is parsed with `parse_block` and stored as
+a `Block`, matching nu, where `$x = ls | length` assigns the pipeline's
+result.
 
 ## Calls (`expr::parse_call`, `resolve_head`, `parse_args`)
 
@@ -156,7 +171,7 @@ details: the single-word fast path never builds a string, and a multi-word
 attempt only happens if the first word is a known *prefix* of some multi-word
 command (`ParseConfig` and the declaration scopes both index prefixes).
 
-`parse_args` classifies each remaining item:
+`parse_args` classifies each remaining item with one `match`:
 
 | Item | Result |
 | --- | --- |
@@ -175,22 +190,22 @@ is left to the consumer; the bridge in `tools/` shows how (chapter 09).
 argument is `$..`/`(..)`/`[..]`/`{..}` parsed as a value, `...x` as a spread,
 and everything else as an **external string**. `external_string` reproduces
 nu-parser's segmenting: a word is split into bare, quoted, backtick and
-parenthesised segments, quoted segments stay literal, parenthesised bare
-segments interpolate, and all-literal words collapse to one string
-(`--query='q($x)'` keeps its parentheses; `--out=(pwd)/x` interpolates).
+parenthesised segments (the `Segment` state machine), quoted segments stay
+literal, parenthesised bare segments interpolate, and all-literal words
+collapse to one string (`--query='q($x)'` keeps its parentheses;
+`--out=(pwd)/x` interpolates).
 
 `FOO=bar BAZ=$x cmd`: leading items of the form `NAME=value` with an
 identifier `NAME` become `EnvShorthand`; the value is a `$` expression or a
 strict string. A line consisting only of shorthand is an error.
 
-## Token-stream helpers you will reuse
+## Cursor idioms you will reuse
 
 ```rust,ignore
-let mut i = toks(st, tokens);                 // wrap a token slice (must end with Eof)
-let tok = expect_item(&mut i, "command name")?; // next Item, or "expected command name" at the right span
-if at_end(&i) { .. }                          // only Eof remains
-expect_end(&mut i)?;                          // ExtraTokens error otherwise
-let rest: Option<Span> = rest_span(&mut i);   // consume the rest, get its span
-let items_ = items(tokens);                   // slice without the Eof
-let sub = with_eof(&items_[a..b]);            // a sub-slice as a fresh token list
+let kw = c.expect_item("for")?;                 // next Item, or "expected for" at the right span
+if c.at_end() { .. }                            // nothing left
+c.expect_end()?;                                // ExtraTokens error otherwise
+let rest: Option<Span> = c.rest_span();         // consume the rest, get its span
+let cond = c.slice(1..block_idx);               // a sub-cursor over some of the items
+let items = c.all();                            // the underlying slice, for index arithmetic
 ```

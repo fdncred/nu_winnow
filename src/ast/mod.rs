@@ -204,6 +204,12 @@ impl<'a> Expr<'a> {
     pub fn is_garbage(&self) -> bool {
         matches!(self.kind, ExprKind::Garbage)
     }
+
+    /// The span of the keyword that starts this expression (`let`, `if`, ...),
+    /// if it is a keyword statement. See [`ExprKind::keyword`].
+    pub fn keyword_span(&self) -> Option<Span> {
+        self.kind.keyword().map(|kw| Span::new(self.span.start, self.span.start + kw.len()))
+    }
 }
 
 /// The kinds of expression.
@@ -323,6 +329,37 @@ pub enum ExprKind<'a> {
     /// A placeholder for text that failed to parse (only produced by
     /// [`crate::parse_lenient`]).
     Garbage,
+}
+
+impl<'a> ExprKind<'a> {
+    /// The keyword that starts this expression, for keyword statements
+    /// (`let`, `def`, `if`, ...). The keyword is always the first word of the
+    /// expression's span, so its span is [`Expr::keyword_span`].
+    pub fn keyword(&self) -> Option<&'static str> {
+        Some(match self {
+            ExprKind::Let(_) => "let",
+            ExprKind::Mut(_) => "mut",
+            ExprKind::Const(_) => "const",
+            ExprKind::Def(_) => "def",
+            ExprKind::Extern(_) => "extern",
+            ExprKind::Alias(_) => "alias",
+            ExprKind::Use(_) => "use",
+            ExprKind::Module(_) => "module",
+            ExprKind::Export(_) => "export",
+            ExprKind::ExportEnv(_) => "export-env",
+            ExprKind::If(_) => "if",
+            ExprKind::Match(_) => "match",
+            ExprKind::For(_) => "for",
+            ExprKind::While(_) => "while",
+            ExprKind::Loop(_) => "loop",
+            ExprKind::Try(_) => "try",
+            ExprKind::Return(_) => "return",
+            ExprKind::Break => "break",
+            ExprKind::Continue => "continue",
+            ExprKind::Where(_) => "where",
+            _ => return None,
+        })
+    }
 }
 
 /// How a string literal was quoted.
@@ -1286,8 +1323,6 @@ pub struct Signature<'a> {
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Binding<'a> {
-    /// The keyword span.
-    pub keyword: Span,
     /// The variable name (without `$`).
     pub name: Spanned<&'a str>,
     /// The type after `:`.
@@ -1312,8 +1347,6 @@ pub enum DefFlag {
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Def<'a> {
-    /// The `def` keyword span.
-    pub keyword: Span,
     /// `--env` / `--wrapped`.
     pub flags: Vec<Spanned<DefFlag>>,
     /// The command name (quotes removed).
@@ -1328,8 +1361,6 @@ pub struct Def<'a> {
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Extern<'a> {
-    /// The keyword span.
-    pub keyword: Span,
     /// The command name.
     pub name: Spanned<Cow<'a, str>>,
     /// The signature.
@@ -1340,8 +1371,6 @@ pub struct Extern<'a> {
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Alias<'a> {
-    /// The keyword span.
-    pub keyword: Span,
     /// The alias name.
     pub name: Spanned<Cow<'a, str>>,
     /// The span of the `=`.
@@ -1376,8 +1405,6 @@ pub enum UseMemberKind<'a> {
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Use<'a> {
-    /// The keyword span.
-    pub keyword: Span,
     /// The module name or path (a string literal, or `null`).
     pub module: Box<Expr<'a>>,
     /// The members to import.
@@ -1388,8 +1415,6 @@ pub struct Use<'a> {
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Module<'a> {
-    /// The keyword span.
-    pub keyword: Span,
     /// The module name or path.
     pub name: Box<Expr<'a>>,
     /// The body, if inline.
@@ -1400,8 +1425,6 @@ pub struct Module<'a> {
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Export<'a> {
-    /// The keyword span.
-    pub keyword: Span,
     /// The exported definition.
     pub item: Box<Expr<'a>>,
 }
@@ -1410,8 +1433,6 @@ pub struct Export<'a> {
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct ExportEnv<'a> {
-    /// The keyword span.
-    pub keyword: Span,
     /// The body.
     pub body: Block<'a>,
 }
@@ -1430,8 +1451,6 @@ pub struct Else<'a> {
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct If<'a> {
-    /// The keyword span.
-    pub keyword: Span,
     /// The condition.
     pub condition: Box<Expr<'a>>,
     /// The then block.
@@ -1460,8 +1479,6 @@ pub struct MatchArm<'a> {
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Match<'a> {
-    /// The keyword span.
-    pub keyword: Span,
     /// The scrutinee.
     pub value: Box<Expr<'a>>,
     /// The span of the `{ ... }`.
@@ -1504,8 +1521,6 @@ pub enum PatternKind<'a> {
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct For<'a> {
-    /// The keyword span.
-    pub keyword: Span,
     /// The loop variable.
     pub var: Spanned<&'a str>,
     /// The loop variable's type.
@@ -1522,8 +1537,6 @@ pub struct For<'a> {
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct While<'a> {
-    /// The keyword span.
-    pub keyword: Span,
     /// The condition.
     pub condition: Box<Expr<'a>>,
     /// The body.
@@ -1534,8 +1547,6 @@ pub struct While<'a> {
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Loop<'a> {
-    /// The keyword span.
-    pub keyword: Span,
     /// The body.
     pub body: Block<'a>,
 }
@@ -1544,8 +1555,6 @@ pub struct Loop<'a> {
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Return<'a> {
-    /// The keyword span.
-    pub keyword: Span,
     /// The returned value.
     pub value: Option<Box<Expr<'a>>>,
 }
@@ -1576,8 +1585,6 @@ pub struct Handler<'a> {
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Try<'a> {
-    /// The keyword span.
-    pub keyword: Span,
     /// The body.
     pub body: Block<'a>,
     /// The handlers in source order (at most two, in any order; Nushell
@@ -1601,8 +1608,6 @@ impl<'a> Try<'a> {
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Where<'a> {
-    /// The keyword span.
-    pub keyword: Span,
     /// A closure, or a row condition in which bare column names are cell paths
     /// on the implicit `$it`.
     pub condition: Box<Expr<'a>>,

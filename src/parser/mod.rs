@@ -8,19 +8,26 @@
 //!    (`def`, `let`, `if`, ...), a call, an assignment, or a math expression.
 //! 3. [`expr`]: math expressions with precedence, calls and their arguments.
 //! 4. [`value`]: a single item becomes a literal, variable, path, collection,
-//!    closure, block or subexpression, re-lexing its interior as needed.
+//!    closure, block or subexpression, re-lexing its interior as needed. Its
+//!    helpers live in [`strings`], [`cellpath`] and [`collections`].
 //! 5. [`literal`], [`signature`], [`pattern`]: character-level parsers for
 //!    literals, signatures/types and match patterns.
+//!
+//! Layers 2 and 3 walk the items of one command with a [`cursor::Cursor`].
 //!
 //! All layers share [`St`], a copyable handle to the source text and the
 //! mutable [`Shared`] state (collected comments, diagnostics, declared names).
 
 pub(crate) mod block;
+pub(crate) mod cellpath;
+pub(crate) mod collections;
+pub(crate) mod cursor;
 pub(crate) mod expr;
 pub(crate) mod literal;
 pub(crate) mod pattern;
 pub(crate) mod signature;
 pub(crate) mod statement;
+pub(crate) mod strings;
 pub(crate) mod value;
 
 use std::cell::RefCell;
@@ -139,13 +146,6 @@ pub struct Shared {
     decl_scopes: Vec<CommandSet>,
 }
 
-/// A snapshot of the shared state, used to roll back speculative parses.
-#[derive(Clone, Copy, Debug)]
-pub struct Checkpoint {
-    comments: usize,
-    diagnostics: usize,
-}
-
 /// Copyable handle to the source and the shared state.
 #[derive(Clone, Copy, Debug)]
 pub struct St<'s, 'a> {
@@ -183,19 +183,6 @@ impl<'s, 'a> St<'s, 'a> {
     /// Record a diagnostic (used for recovered errors).
     pub fn error(&self, d: Diagnostic) {
         self.shared.borrow_mut().diagnostics.push(d);
-    }
-
-    /// Snapshot the shared state.
-    pub fn checkpoint(&self) -> Checkpoint {
-        let shared = self.shared.borrow();
-        Checkpoint { comments: shared.comments.len(), diagnostics: shared.diagnostics.len() }
-    }
-
-    /// Roll back to a snapshot (discarding comments and diagnostics recorded since).
-    pub fn rollback(&self, cp: Checkpoint) {
-        let mut shared = self.shared.borrow_mut();
-        shared.comments.truncate(cp.comments);
-        shared.diagnostics.truncate(cp.diagnostics);
     }
 
     /// Whether `name` is a known command (configured or declared in scope).
@@ -256,7 +243,7 @@ pub(crate) fn parse_source<'a>(source: &'a str, config: &ParseConfig) -> (Ast<'a
         Span::new(0, end)
     });
     let block = match st.lex_span(full, LexOptions::BLOCK) {
-        Ok(tokens) => block::parse_block_tokens(st, &tokens, full),
+        Ok(tokens) => block::parse_block(st, cursor::Cursor::from_lexed(&tokens), full),
         Err(d) => {
             st.error(d);
             Block { span: full, pipelines: Vec::new() }

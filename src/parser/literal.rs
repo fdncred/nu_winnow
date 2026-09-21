@@ -33,15 +33,13 @@ pub fn parse_int(text: &str) -> Option<i64> {
     if text.is_empty() {
         return None;
     }
-    if let Some(hex) = text.strip_prefix("0x") {
-        u64::from_str_radix(hex, 16).ok().map(|n| n as i64)
-    } else if let Some(oct) = text.strip_prefix("0o") {
-        u64::from_str_radix(oct, 8).ok().map(|n| n as i64)
-    } else if let Some(bin) = text.strip_prefix("0b") {
-        u64::from_str_radix(bin, 2).ok().map(|n| n as i64)
-    } else {
-        text.parse::<i64>().ok()
-    }
+    let (digits, radix) = match text.as_bytes() {
+        [b'0', b'x', ..] => (&text[2..], 16),
+        [b'0', b'o', ..] => (&text[2..], 8),
+        [b'0', b'b', ..] => (&text[2..], 2),
+        _ => return text.parse::<i64>().ok(),
+    };
+    u64::from_str_radix(digits, radix).ok().map(|n| n as i64)
 }
 
 /// Parse a float literal. Accepts everything Rust's `f64::from_str` accepts
@@ -57,12 +55,10 @@ pub fn parse_float(text: &str) -> Option<f64> {
 /// Parse an int or float.
 pub fn number<'a>(st: St<'_, 'a>, span: Span) -> PResult<Expr<'a>> {
     let text = st.text(span);
-    if let Some(i) = parse_int(text) {
-        Ok(Expr::new(ExprKind::Int(i), span))
-    } else if let Some(f) = parse_float(text) {
-        Ok(Expr::new(ExprKind::Float(f), span))
-    } else {
-        Err(cut(Diagnostic::expected("number", span)))
+    match (parse_int(text), parse_float(text)) {
+        (Some(i), _) => Ok(Expr::new(ExprKind::Int(i), span)),
+        (None, Some(f)) => Ok(Expr::new(ExprKind::Float(f), span)),
+        (None, None) => Err(cut(Diagnostic::expected("number", span))),
     }
 }
 
@@ -191,14 +187,11 @@ pub fn is_datetime(text: &str) -> bool {
 /// start like a binary literal at all.
 pub fn binary<'a>(st: St<'_, 'a>, span: Span) -> Option<PResult<Expr<'a>>> {
     let text = st.text(span);
-    let (radix, digits_per_byte, prefix) = if text.starts_with("0x[") {
-        (16, 2, "0x[")
-    } else if text.starts_with("0o[") {
-        (8, 3, "0o[")
-    } else if text.starts_with("0b[") {
-        (2, 8, "0b[")
-    } else {
-        return None;
+    let (radix, digits_per_byte, prefix) = match text.as_bytes() {
+        [b'0', b'x', b'[', ..] => (16, 2, "0x["),
+        [b'0', b'o', b'[', ..] => (8, 3, "0o["),
+        [b'0', b'b', b'[', ..] => (2, 8, "0b["),
+        _ => return None,
     };
     Some(binary_inner(st, span, text, radix, digits_per_byte, prefix))
 }

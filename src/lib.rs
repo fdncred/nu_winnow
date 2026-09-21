@@ -21,9 +21,9 @@
 #![forbid(unsafe_code)]
 
 pub mod ast;
-pub mod docs;
 #[cfg(feature = "builtin-commands")]
 pub mod builtin_commands;
+pub mod docs;
 pub mod error;
 pub mod flatten;
 pub mod input;

@@ -31,19 +31,20 @@
 
 Suppose Nushell gains `unless COND { }`.
 
-1. `src/ast/mod.rs`: add `pub struct Unless<'a> { keyword: Span, condition:
-   Box<Expr<'a>>, body: Block<'a> }` and `ExprKind::Unless(Unless<'a>)`.
+1. `src/ast/mod.rs`: add `pub struct Unless<'a> { condition: Box<Expr<'a>>,
+   body: Block<'a> }` and `ExprKind::Unless(Unless<'a>)`, and add
+   `ExprKind::Unless(_) => "unless"` to `ExprKind::keyword` so consumers can
+   find the keyword's span.
 2. `src/parser/statement.rs`: write `unless_stmt` modelled on `while_stmt`
    (condition = items up to the last, body = last item via `block_item`), and
-   add `"unless" => { ctx = "unless"; unless_stmt(st, tokens) }` to
-   `keyword_or_call`. If the keyword must only appear at a pipeline head
+   add `"unless" => ("unless", unless_stmt(st, c))` to `keyword_or_call`. If the keyword must only appear at a pipeline head
    (like `def`), add it to `is_statement_keyword`; if it can be an operand
    (like `if`), add it to `looks_like_value`'s keyword list in `value.rs`
    and to `math_expression`'s `"if" | "match"` check in `expr.rs`. If a
    `def` may not use the name, add it to `is_parser_keyword`.
 3. `src/ast/visit.rs`: descend into the condition and body in `walk_expr`.
-4. `src/flatten.rs`: push the keyword as `FlatShape::Keyword`, visit the
-   condition, `block_braces` for the body.
+4. `src/flatten.rs`: the keyword shape is pushed for you from
+   `keyword_span()`; visit the condition and call `block_braces` for the body.
 5. `src/pretty.rs`: print it.
 6. `examples/nufmt/format.rs`: emit it (the formatter matches on `ExprKind`
    and has a wildcard fallback that copies the source text, so this can be
@@ -85,16 +86,18 @@ compare with `nu-check --debug file.nu`.
 
 ## Pitfalls
 
-* **Every token slice must end with `Eof`.** Parsers over `Toks` report
-  positions from the next token; without the sentinel a slice that runs out
-  reports offset 0. Use `with_eof` when building sub-slices.
+* **Give a cursor its end.** `Cursor::new(tokens, end)` needs the byte offset
+  after the last token so that "expected X" at the end of the input has a
+  position; use `c.slice(a..b)` or `raw.cursor()` rather than building one by
+  hand.
 * **Spans are absolute.** When you slice an item to parse a part of it, pass
   the absolute start (`Span::new(span.start + k, ...)`, `lex(text, base, ..)`).
 * **Cut, don't backtrack.** Return `cut(Diagnostic::...)` for real errors; a
   backtrack error inside `?` becomes a confusing "expected valid syntax".
 * **Block recovery records errors.** A block that fails to parse still
-  returns `Ok`; if you try a block speculatively, wrap it in
-  `st.checkpoint()`/`st.rollback(cp)`.
+  returns `Ok` with its errors recorded, so never parse a block to find out
+  whether an item is one; decide from the text first (`probe_brace`,
+  `is_range_syntax`, `looks_like_value` are the existing examples).
 * **Comments are recorded where they are lexed.** If you re-lex an interior
   with `skip_comments: false`, call `st.comments_from(&tokens)` (or handle
   `Comment` tokens) so they are kept; if you lex the same text twice, the
@@ -107,7 +110,7 @@ compare with `nu-check --debug file.nu`.
 * **Keep `ast::visit`, `flatten`, `pretty` and the formatter in step** with
   any node change; clippy will not tell you about a missing descent.
 * **Performance.** The hot path is `value` on bare words: every argument goes
-  through the literal attempts. Keep those attempts allocation-free on
-  failure (`literal::filesize` checks the first bytes before uppercasing;
+  through the literal attempts, and `looks_like_value` on every command head.
+  Keep those attempts allocation-free on failure (`literal::filesize` checks the first bytes before uppercasing;
   `resolve_head` only joins words when the first word is a known prefix).
   `cargo bench` and the `--check` example over `nu_scripts` are the yardsticks.

@@ -72,6 +72,11 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
         Span::new(s.start + self.offset, s.end + self.offset)
     }
 
+    /// The span of the keyword `kw` that starts the statement covering `span`.
+    fn keyword_span(&self, span: Span, kw: &str) -> Span {
+        Span::new(span.start, span.start + kw.len())
+    }
+
     fn expression(&mut self, expr: Expr, span: Span, ty: Type) -> Expression {
         Expression::new(self.ws, expr, span, ty)
     }
@@ -373,7 +378,7 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
             w::ExprKind::Match(m) => return self.match_expr(m, span),
             w::ExprKind::For(f) => return self.for_expr(f, span),
             w::ExprKind::While(wh) => {
-                let mut call = self.keyword_call("while", self.span(wh.keyword))?;
+                let mut call = self.keyword_call("while", self.keyword_span(span, "while"))?;
                 let cond = self.expr(&wh.condition)?;
                 call.add_positional(cond);
                 let body_span = self.span(wh.body.span);
@@ -383,7 +388,7 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                 (Expr::Call(Box::new(call)), Type::Nothing)
             }
             w::ExprKind::Loop(l) => {
-                let mut call = self.keyword_call("loop", self.span(l.keyword))?;
+                let mut call = self.keyword_call("loop", self.keyword_span(span, "loop"))?;
                 let body_span = self.span(l.body.span);
                 let body = self.scoped_block(&l.body, body_span, false)?;
                 let body = self.expression(Expr::Block(body), body_span, Type::Block);
@@ -393,7 +398,7 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
             w::ExprKind::Break => (Expr::Call(Box::new(self.keyword_call("break", span)?)), Type::Nothing),
             w::ExprKind::Continue => (Expr::Call(Box::new(self.keyword_call("continue", span)?)), Type::Nothing),
             w::ExprKind::Return(r) => {
-                let mut call = self.keyword_call("return", self.span(r.keyword))?;
+                let mut call = self.keyword_call("return", self.keyword_span(span, "return"))?;
                 if let Some(v) = &r.value {
                     let v = self.expr(v)?;
                     call.add_positional(v);
@@ -401,7 +406,7 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                 (Expr::Call(Box::new(call)), Type::Nothing)
             }
             w::ExprKind::Try(t) => {
-                let mut call = self.keyword_call("try", self.span(t.keyword))?;
+                let mut call = self.keyword_call("try", self.keyword_span(span, "try"))?;
                 let body_span = self.span(t.body.span);
                 let body = self.scoped_block(&t.body, body_span, false)?;
                 let body = self.expression(Expr::Block(body), body_span, Type::Block);
@@ -421,7 +426,7 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                 (Expr::Call(Box::new(call)), Type::Any)
             }
             w::ExprKind::Where(wh) => {
-                let mut call = self.keyword_call("where", self.span(wh.keyword))?;
+                let mut call = self.keyword_call("where", self.keyword_span(span, "where"))?;
                 let cond_span = self.span(wh.condition.span);
                 let block_id = match &wh.condition.kind {
                     w::ExprKind::Closure(c) => self.closure_block(c.params.as_ref(), &c.body, cond_span, "closure")?.0,
@@ -627,7 +632,7 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
     // --- keyword statements -------------------------------------------------------------
 
     fn binding(&mut self, b: &w::Binding<'a>, keyword: &str, mutable: bool, span: Span) -> LResult<Expression> {
-        let mut call = self.keyword_call(keyword, self.span(b.keyword))?;
+        let mut call = self.keyword_call(keyword, self.keyword_span(span, keyword))?;
         let value = match &b.value {
             Some(v) => {
                 let vspan = self.span(v.span);
@@ -711,14 +716,14 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
         *self.ws.get_block_mut(placeholder) = body;
 
         // The `def` statement itself evaluates to nothing; the compiler ignores its arguments.
-        let mut call = self.keyword_call("def", self.span(d.keyword))?;
+        let mut call = self.keyword_call("def", self.keyword_span(span, "def"))?;
         let name = self.expression(Expr::String(d.name.item.to_string()), self.span(d.name.span), Type::String);
         call.add_positional(name);
         Ok(self.expression(Expr::Call(Box::new(call)), span, Type::Nothing))
     }
 
     fn if_expr(&mut self, i: &w::If<'a>, span: Span) -> LResult<Expression> {
-        let mut call = self.keyword_call("if", self.span(i.keyword))?;
+        let mut call = self.keyword_call("if", self.keyword_span(span, "if"))?;
         let cond = self.expr(&i.condition)?;
         call.add_positional(cond);
         let then_span = self.span(i.then_block.span);
@@ -737,7 +742,7 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
     }
 
     fn for_expr(&mut self, f: &w::For<'a>, span: Span) -> LResult<Expression> {
-        let mut call = self.keyword_call("for", self.span(f.keyword))?;
+        let mut call = self.keyword_call("for", self.keyword_span(span, "for"))?;
         let iterable = self.expr(&f.iterable)?;
         self.ws.enter_scope();
         let var_id = self.declare_var(f.var.item, self.span(f.var.span), false);
@@ -757,7 +762,7 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
     }
 
     fn match_expr(&mut self, m: &w::Match<'a>, span: Span) -> LResult<Expression> {
-        let mut call = self.keyword_call("match", self.span(m.keyword))?;
+        let mut call = self.keyword_call("match", self.keyword_span(span, "match"))?;
         let value = self.expr(&m.value)?;
         call.add_positional(value);
         let mut arms = Vec::with_capacity(m.arms.len());

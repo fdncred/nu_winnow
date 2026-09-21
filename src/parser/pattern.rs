@@ -3,99 +3,74 @@
 use std::borrow::Cow;
 
 use crate::ast::{MatchArm, Pattern, PatternKind};
-use crate::error::{Diagnostic, ErrorKind};
+use crate::error::Diagnostic;
 use crate::input::{PResult, cut};
 use crate::lexer::{LexOptions, Token, TokenKind};
 use crate::span::{Span, Spanned};
 
-use super::value::{self, Hint, is_identifier};
-use super::{St, expr};
+use super::cellpath::is_identifier;
+use super::cursor::Cursor;
+use super::value::{self, Hint, interior};
+use super::{St, expr, strings};
 
 /// Parse the `{ pattern => body, ... }` item of a `match`.
 pub fn match_block<'a>(st: St<'_, 'a>, span: Span) -> PResult<(Span, Vec<MatchArm<'a>>)> {
-    let text = st.text(span);
-    if !text.starts_with('{') {
-        return Err(cut(Diagnostic::expected("match block", span)));
-    }
-    if text.len() < 2 || !text.ends_with('}') {
-        return Err(cut(Diagnostic::new(
-            ErrorKind::Unclosed { delimiter: "}", open: Span::new(span.start, span.start + 1) },
-            span.past(),
-        )));
-    }
-    let inner = Span::new(span.start + 1, span.end - 1);
+    let inner = interior(st, span, "{", "}")?;
     let tokens = st.lex_span(inner, LexOptions::MATCH).map_err(cut)?;
     st.comments_from(&tokens);
-    let tokens: Vec<Token> =
-        tokens.into_iter().filter(|t| !matches!(t.kind, TokenKind::Comment | TokenKind::Eol)).collect();
+    let tokens: Vec<Token> = tokens
+        .into_iter()
+        .filter(|t| !matches!(t.kind, TokenKind::Comment | TokenKind::Eol | TokenKind::Eof))
+        .collect();
+    let mut c = Cursor::new(&tokens, inner.end);
     let mut arms = Vec::new();
-    let mut idx = 0;
-    let last = tokens.len() - 1; // Eof
-    while idx < last {
-        let mut pattern = parse_pattern(st, &tokens[idx])?;
-        idx += 1;
-        // Or-patterns.
-        if tokens[idx].kind == TokenKind::Pipe {
-            let mut alternatives = vec![pattern];
-            while tokens[idx].kind == TokenKind::Pipe {
-                idx += 1;
-                if idx >= last {
-                    return Err(cut(Diagnostic::expected("pattern after `|`", tokens[idx].span)));
-                }
-                alternatives.push(parse_pattern(st, &tokens[idx])?);
-                idx += 1;
-            }
-            let span = alternatives.first().unwrap().span.merge(alternatives.last().unwrap().span);
-            pattern = Pattern { span, kind: PatternKind::Or(alternatives) };
-        }
-        // Guard.
-        let mut guard = None;
-        if tokens[idx].kind == TokenKind::Item && st.tok(&tokens[idx]) == "if" {
-            let if_span = tokens[idx].span;
-            idx += 1;
-            let arrow = tokens[idx..last].iter().position(|t| t.kind == TokenKind::Item && st.tok(t) == "=>");
-            let end = arrow.map_or(last, |p| idx + p);
-            if end == idx {
-                return Err(cut(Diagnostic::expected("expression after `if` in match guard", if_span.past())
-                    .with_help("the `if` keyword must be followed by an expression")));
-            }
-            let guard_tokens = expr::with_eof(&tokens[idx..end]);
-            guard = Some(Box::new(expr::math_expression(st, &guard_tokens, false)?));
-            idx = end;
-        }
-        // Arrow.
-        if idx >= last || tokens[idx].kind != TokenKind::Item || st.tok(&tokens[idx]) != "=>" {
-            let at = tokens[idx.min(last)].span;
-            return Err(cut(Diagnostic::expected("`=>`", at)));
-        }
-        let arrow = tokens[idx].span;
-        idx += 1;
-        // Body.
-        if idx >= last {
-            return Err(cut(Diagnostic::expected("match arm body", arrow.past())));
-        }
-        let body_tok = tokens[idx];
-        if body_tok.kind != TokenKind::Item {
-            return Err(cut(Diagnostic::expected("match arm body", body_tok.span)));
-        }
-        // `{ ... }` is a block unless it looks like a record (`{a: 1}`) or a
-        // closure (`{|x| ...}`).
-        let body = if st.tok(&body_tok).starts_with('{') {
-            let cp = st.checkpoint();
-            match value::value(st, body_tok.span, Hint::Block) {
-                Ok(body) => body,
-                Err(_) => {
-                    st.rollback(cp);
-                    value::value(st, body_tok.span, Hint::Any)?
-                }
-            }
-        } else {
-            expr::parse_expression(st, &expr::with_eof(&tokens[idx..idx + 1]))?
-        };
-        idx += 1;
-        arms.push(MatchArm { span: pattern.span.merge(body.span), pattern, guard, arrow, body });
+    while !c.at_end() {
+        arms.push(match_arm(st, &mut c)?);
     }
     Ok((span, arms))
+}
+
+/// `pattern ( | pattern )* [if guard...] => body`.
+fn match_arm<'a>(st: St<'_, 'a>, c: &mut Cursor<'_>) -> PResult<MatchArm<'a>> {
+    let mut pattern = parse_pattern(st, &c.expect_item("pattern")?)?;
+    if c.peek().is_some_and(|t| t.kind == TokenKind::Pipe) {
+        let mut alternatives = vec![pattern];
+        while c.peek().is_some_and(|t| t.kind == TokenKind::Pipe) {
+            c.next();
+            alternatives.push(parse_pattern(st, &c.expect_item("pattern after `|`")?)?);
+        }
+        let span = alternatives[0].span.merge(alternatives[alternatives.len() - 1].span);
+        pattern = Pattern { span, kind: PatternKind::Or(alternatives) };
+    }
+    let guard = match c.peek() {
+        Some(tok) if tok.kind == TokenKind::Item && st.tok(tok) == "if" => {
+            c.next();
+            let start = c.position();
+            let arrow = c.rest().iter().position(|t| t.kind == TokenKind::Item && st.tok(t) == "=>");
+            let end = arrow.map_or(c.all().len(), |p| start + p);
+            if end == start {
+                return Err(cut(Diagnostic::expected("expression after `if` in match guard", tok.span.past())
+                    .with_help("the `if` keyword must be followed by an expression")));
+            }
+            let guard = expr::math_expression(st, c.slice(start..end), false)?;
+            c.reset(end);
+            Some(Box::new(guard))
+        }
+        _ => None,
+    };
+    let arrow = match c.next() {
+        Some(tok) if tok.kind == TokenKind::Item && st.tok(tok) == "=>" => tok.span,
+        Some(tok) => return Err(cut(Diagnostic::expected("`=>`", tok.span))),
+        None => return Err(cut(Diagnostic::expected("`=>`", c.end_span()))),
+    };
+    // The body is one item: a block (or a record or closure when it looks like
+    // one), otherwise an expression.
+    let body_tok = c.expect_item("match arm body")?;
+    let body = match st.tok(&body_tok).starts_with('{') {
+        true => value::value(st, body_tok.span, Hint::MatchBody)?,
+        false => expr::parse_expression(st, c.slice(c.position() - 1..c.position()))?,
+    };
+    Ok(MatchArm { span: pattern.span.merge(body.span), pattern, guard, arrow, body })
 }
 
 /// Parse one pattern item.
@@ -124,70 +99,48 @@ fn variable_name<'a>(st: St<'_, 'a>, span: Span) -> PResult<&'a str> {
 }
 
 fn list_pattern<'a>(st: St<'_, 'a>, span: Span) -> PResult<Vec<Pattern<'a>>> {
-    let text = st.text(span);
-    if text.len() < 2 || !text.ends_with(']') {
-        return Err(cut(Diagnostic::new(
-            ErrorKind::Unclosed { delimiter: "]", open: Span::new(span.start, span.start + 1) },
-            span.past(),
-        )));
-    }
-    let inner = Span::new(span.start + 1, span.end - 1);
+    let inner = interior(st, span, "[", "]")?;
     let tokens = st.lex_span(inner, LexOptions::PATTERN_LIST).map_err(cut)?;
     st.comments_from(&tokens);
-    let mut out = Vec::new();
-    for tok in tokens.iter().filter(|t| t.kind != TokenKind::Eof && t.kind != TokenKind::Comment) {
-        let text = st.tok(tok);
-        if let Some(rest) = text.strip_prefix("..").filter(|_| !text.starts_with("...")) {
-            let kind = if rest.is_empty() {
-                PatternKind::Rest(None)
-            } else {
-                let name = variable_name(st, Span::new(tok.span.start + 2, tok.span.end))?;
-                PatternKind::Rest(Some(Spanned::new(name, Span::new(tok.span.start + 2, tok.span.end))))
-            };
-            out.push(Pattern { span: tok.span, kind });
-        } else {
-            out.push(parse_pattern(st, tok)?);
-        }
-    }
-    Ok(out)
+    tokens
+        .iter()
+        .filter(|t| !matches!(t.kind, TokenKind::Eof | TokenKind::Comment))
+        .map(|tok| {
+            let text = st.tok(tok);
+            match text.strip_prefix("..").filter(|_| !text.starts_with("...")) {
+                Some("") => Ok(Pattern { span: tok.span, kind: PatternKind::Rest(None) }),
+                Some(_) => {
+                    let name_span = Span::new(tok.span.start + 2, tok.span.end);
+                    let name = variable_name(st, name_span)?;
+                    Ok(Pattern { span: tok.span, kind: PatternKind::Rest(Some(Spanned::new(name, name_span))) })
+                }
+                None => parse_pattern(st, tok),
+            }
+        })
+        .collect()
 }
 
 fn record_pattern<'a>(st: St<'_, 'a>, span: Span) -> PResult<Vec<(Spanned<Cow<'a, str>>, Pattern<'a>)>> {
-    let text = st.text(span);
-    if text.len() < 2 || !text.ends_with('}') {
-        return Err(cut(Diagnostic::new(
-            ErrorKind::Unclosed { delimiter: "}", open: Span::new(span.start, span.start + 1) },
-            span.past(),
-        )));
-    }
-    let inner = Span::new(span.start + 1, span.end - 1);
+    let inner = interior(st, span, "{", "}")?;
     let tokens = st.lex_span(inner, LexOptions::PATTERN_RECORD).map_err(cut)?;
     st.comments_from(&tokens);
-    let items: Vec<&Token> = tokens.iter().filter(|t| t.kind == TokenKind::Item).collect();
+    let items: Vec<Token> = tokens.into_iter().filter(|t| t.kind == TokenKind::Item).collect();
+    let mut c = Cursor::new(&items, inner.end);
     let mut out = Vec::new();
-    let mut idx = 0;
-    while idx < items.len() {
-        let tok = items[idx];
-        let text = st.tok(tok);
-        if text.starts_with('$') {
+    while let Some(tok) = c.next() {
+        if st.tok(tok).starts_with('$') {
+            // `{$name}` binds the field of the same name.
             let name = variable_name(st, tok.span)?;
             let pattern = Pattern { span: tok.span, kind: PatternKind::Variable(name) };
             out.push((Spanned::new(Cow::Borrowed(name), tok.span), pattern));
-            idx += 1;
             continue;
         }
-        let field = value::string_lit(st, tok.span)?.value;
-        idx += 1;
-        match items.get(idx) {
-            Some(colon) if st.tok(colon) == ":" => idx += 1,
-            Some(other) => return Err(cut(Diagnostic::expected("`:` after field name in record pattern", other.span))),
-            None => return Err(cut(Diagnostic::expected("`:` after field name in record pattern", tok.span.past()))),
+        let field = strings::string_lit(st, tok.span)?.value;
+        match c.next() {
+            Some(colon) if st.tok(colon) == ":" => {}
+            _ => return Err(cut(Diagnostic::expected("`:` after field name in record pattern", c.here()))),
         }
-        let Some(pat_tok) = items.get(idx) else {
-            return Err(cut(Diagnostic::expected("pattern for record field", tok.span.past())));
-        };
-        let pattern = parse_pattern(st, pat_tok)?;
-        idx += 1;
+        let pattern = parse_pattern(st, &c.expect_item("pattern for record field")?)?;
         out.push((Spanned::new(field, tok.span), pattern));
     }
     Ok(out)

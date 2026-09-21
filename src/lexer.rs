@@ -11,7 +11,7 @@
 //! end-of-line markers, comments and assignment operators. All spans are
 //! absolute byte offsets into the original source.
 
-use winnow::combinator::{dispatch, empty, fail, peek, preceded};
+use winnow::combinator::{dispatch, peek, preceded};
 use winnow::prelude::*;
 use winnow::stream::{Location, Stream};
 use winnow::token::{any, take_till, take_while};
@@ -267,7 +267,7 @@ pub fn lex_prefix_at(
         }
         match token(&mut i, opts) {
             Ok(Some(tok)) => {
-                push_token(&mut out, tok);
+                out.push(tok);
                 count += 1;
             }
             Ok(None) => {}
@@ -275,26 +275,6 @@ pub fn lex_prefix_at(
         }
     }
     Ok((out, i.current_token_start()))
-}
-
-/// Push a token, applying the "a `|` after a newline continues the pipeline" rule:
-/// `foo\n| bar` lexes as `foo | bar`, and comment lines in between are kept
-/// without the newlines that would otherwise break the pipeline.
-fn push_token(out: &mut Vec<Token>, tok: Token) {
-    if tok.kind == TokenKind::Pipe
-        && let Some(prev) = out.last_mut()
-        && prev.kind == TokenKind::Eol
-    {
-        *prev = tok;
-        // Remove `Eol` tokens that separate comment lines preceding this pipe.
-        let mut idx = out.len() - 1;
-        while idx >= 2 && out[idx - 1].kind == TokenKind::Comment && out[idx - 2].kind == TokenKind::Eol {
-            out.remove(idx - 2);
-            idx -= 2;
-        }
-        return;
-    }
-    out.push(tok);
 }
 
 fn skip_whitespace(i: &mut Input<'_>, opts: LexOptions) {
@@ -393,8 +373,10 @@ fn item(i: &mut Input<'_>, opts: LexOptions) -> PResult<TokenKind> {
     let base = i.state.0 + i.current_token_start();
     let abs = |off: usize| base + off;
 
+    // The quote we are inside, with the offset where it opened.
     let mut quote: Option<(u8, usize)> = None;
     let mut quote_is_interp = false;
+    // Open delimiters inside a `(...)` of an interpolated string.
     let mut interp_level: Vec<(u8, usize)> = Vec::new();
     let mut in_comment = false;
     let mut brackets: Vec<(Bracket, usize)> = Vec::new();
@@ -410,124 +392,85 @@ fn item(i: &mut Input<'_>, opts: LexOptions) -> PResult<TokenKind> {
 
     while off < bytes.len() {
         let c = bytes[off];
-        if let Some((q, _)) = quote {
-            if !interp_level.is_empty() {
-                if interp_subexpr_step(&mut interp_level, c, abs(off)) && off + 1 < bytes.len() {
-                    off += 2;
-                    prev = Some(c);
-                    continue;
-                }
-                off += 1;
+        match quote {
+            Some(_) if !interp_level.is_empty() => {
+                // Inside `$"... ( ... )"`: track nested delimiters until the `)` closes.
+                let escaped = interp_subexpr_step(&mut interp_level, c, abs(off)) && off + 1 < bytes.len();
+                off += if escaped { 2 } else { 1 };
                 prev = Some(c);
                 continue;
             }
-            if c == b'\\' && q == b'"' {
-                if off + 1 < bytes.len() {
+            Some((q, open_at)) => match c {
+                b'\\' if q == b'"' => {
+                    if off + 1 >= bytes.len() {
+                        return Err(unclosed(quote_str(q), open_at, abs(off + 1)));
+                    }
                     off += 2;
                     prev = Some(c);
                     continue;
                 }
-                let (_, open) = quote.expect("in quote");
-                return Err(cut(Diagnostic::new(
-                    ErrorKind::Unclosed { delimiter: quote_str(q), open: Span::new(open, open + 1) },
-                    Span::point(abs(off + 1)),
-                )));
-            }
-            if c == q {
-                quote = None;
-            } else if quote_is_interp && c == b'(' {
-                interp_level.push((b')', abs(off)));
-            }
-        } else if c == b'#' && !in_comment {
-            in_comment = prev.map(|p| p.is_ascii_whitespace()).unwrap_or(true);
-        } else if c == b'\n' || c == b'\r' {
-            in_comment = false;
-            if is_terminator(&brackets, c) {
-                break;
-            }
-        } else if in_comment {
-            if is_terminator(&brackets, c) {
-                break;
-            }
-        } else if brackets.is_empty() && opts.special.contains(&c) && off == 0 {
-            off += 1;
-            break;
-        } else if c == b'\'' || c == b'"' || c == b'`' {
-            quote = Some((c, abs(off)));
-            quote_is_interp = c != b'`' && prev == Some(b'$');
-        } else if c == b'[' {
-            brackets.push((Bracket::Square, abs(off)));
-        } else if c == b'<' && opts.signature {
-            brackets.push((Bracket::Angle, abs(off)));
-        } else if c == b'>' && opts.signature {
-            if matches!(brackets.last(), Some((Bracket::Angle, _))) {
-                brackets.pop();
-            }
-        } else if c == b']' {
-            if matches!(brackets.last(), Some((Bracket::Square, _))) {
-                brackets.pop();
-            } else if let Some(&(open, open_at)) = brackets.last() {
-                return Err(unbalanced("]", open, open_at, abs(off)));
-            }
-        } else if c == b'{' {
-            brackets.push((Bracket::Curly, abs(off)));
-        } else if c == b'}' {
-            if matches!(brackets.last(), Some((Bracket::Curly, _))) {
-                brackets.pop();
-            } else {
-                return Err(match brackets.last() {
-                    Some(&(open, open_at)) => unbalanced("}", open, open_at, abs(off)),
-                    None => cut(Diagnostic::new(
-                        ErrorKind::Unbalanced { found: "}", expected: "{" },
-                        Span::new(abs(off), abs(off + 1)),
-                    )),
-                });
-            }
-        } else if c == b'(' {
-            brackets.push((Bracket::Paren, abs(off)));
-        } else if c == b')' {
-            if matches!(brackets.last(), Some((Bracket::Paren, _))) {
-                brackets.pop();
-            } else {
-                return Err(match brackets.last() {
-                    Some(&(open, open_at)) => unbalanced(")", open, open_at, abs(off)),
-                    None => cut(Diagnostic::new(
-                        ErrorKind::Unbalanced { found: ")", expected: "(" },
-                        Span::new(abs(off), abs(off + 1)),
-                    )),
-                });
-            }
-        } else if c == b'r' && bytes.get(off + 1) == Some(&b'#') {
-            off = raw_string_end(bytes, off, abs)?;
-            prev = Some(b'#');
-            continue;
-        } else if c == b'|' && is_redirection_prefix(&bytes[..off]) {
-            off += 1;
-            break;
-        } else if is_terminator(&brackets, c) {
-            break;
+                _ if c == q => quote = None,
+                b'(' if quote_is_interp => interp_level.push((b')', abs(off))),
+                _ => {}
+            },
+            None => match c {
+                b'#' if !in_comment => in_comment = prev.is_none_or(|p| p.is_ascii_whitespace()),
+                b'\n' | b'\r' => {
+                    in_comment = false;
+                    if is_terminator(&brackets, c) {
+                        break;
+                    }
+                }
+                _ if in_comment => {
+                    if is_terminator(&brackets, c) {
+                        break;
+                    }
+                }
+                // A special character (`:` in record keys, `.` in cell paths) is an item of its own.
+                _ if off == 0 && brackets.is_empty() && opts.special.contains(&c) => {
+                    off += 1;
+                    break;
+                }
+                b'\'' | b'"' | b'`' => {
+                    quote = Some((c, abs(off)));
+                    quote_is_interp = c != b'`' && prev == Some(b'$');
+                }
+                b'[' => brackets.push((Bracket::Square, abs(off))),
+                b'{' => brackets.push((Bracket::Curly, abs(off))),
+                b'(' => brackets.push((Bracket::Paren, abs(off))),
+                b'<' if opts.signature => brackets.push((Bracket::Angle, abs(off))),
+                b'>' if opts.signature => {
+                    if matches!(brackets.last(), Some((Bracket::Angle, _))) {
+                        brackets.pop();
+                    }
+                }
+                b']' | b'}' | b')' => close_bracket(&mut brackets, c, abs(off))?,
+                b'r' if bytes.get(off + 1) == Some(&b'#') => {
+                    off = raw_string_end(bytes, off, abs)?;
+                    prev = Some(b'#');
+                    continue;
+                }
+                // `e>|` is one token even though `|` normally terminates the item.
+                b'|' if is_redirection_prefix(&bytes[..off]) => {
+                    off += 1;
+                    break;
+                }
+                _ if is_terminator(&brackets, c) => break,
+                _ => {}
+            },
         }
         off += 1;
         prev = Some(c);
     }
 
     if let Some(&(closer, open_at)) = interp_level.first() {
-        return Err(cut(Diagnostic::new(
-            ErrorKind::Unclosed { delimiter: quote_str(closer), open: Span::new(open_at, open_at + 1) },
-            Span::point(abs(off)),
-        )));
+        return Err(unclosed(quote_str(closer), open_at, abs(off)));
     }
     if let Some((q, open_at)) = quote {
-        return Err(cut(Diagnostic::new(
-            ErrorKind::Unclosed { delimiter: quote_str(q), open: Span::new(open_at, open_at + 1) },
-            Span::point(abs(off)),
-        )));
+        return Err(unclosed(quote_str(q), open_at, abs(off)));
     }
     if let Some(&(open, open_at)) = brackets.last() {
-        return Err(cut(Diagnostic::new(
-            ErrorKind::Unclosed { delimiter: open.closer(), open: Span::new(open_at, open_at + 1) },
-            Span::point(abs(off)),
-        )));
+        return Err(unclosed(open.closer(), open_at, abs(off)));
     }
     if off == 0 {
         return Err(cut(Diagnostic::new(ErrorKind::UnexpectedEof("command"), Span::point(base))));
@@ -543,6 +486,32 @@ fn item(i: &mut Input<'_>, opts: LexOptions) -> PResult<TokenKind> {
     })?;
     i.next_slice(off);
     Ok(kind)
+}
+
+fn unclosed(delimiter: &'static str, open_at: usize, at: usize) -> winnow::error::ErrMode<Diagnostic> {
+    cut(Diagnostic::new(ErrorKind::Unclosed { delimiter, open: Span::new(open_at, open_at + 1) }, Span::point(at)))
+}
+
+/// Pop the bracket closed by `c`, or report the mismatch. A stray `]` is
+/// ordinary text (`a]`); a stray `}` or `)` is an error.
+fn close_bracket(brackets: &mut Vec<(Bracket, usize)>, c: u8, at: usize) -> PResult<()> {
+    let (expected, found) = match c {
+        b']' => (Bracket::Square, "]"),
+        b'}' => (Bracket::Curly, "}"),
+        _ => (Bracket::Paren, ")"),
+    };
+    match brackets.last() {
+        Some((open, _)) if *open == expected => {
+            brackets.pop();
+            Ok(())
+        }
+        Some(&(open, open_at)) => Err(unbalanced(found, open, open_at, at)),
+        None if c == b']' => Ok(()),
+        None => Err(cut(Diagnostic::new(
+            ErrorKind::Unbalanced { found, expected: open_kind(expected) },
+            Span::new(at, at + 1),
+        ))),
+    }
 }
 
 fn unbalanced(found: &'static str, open: Bracket, open_at: usize, at: usize) -> winnow::error::ErrMode<Diagnostic> {
@@ -623,14 +592,6 @@ pub(crate) fn lex_debug(text: &str, opts: LexOptions) -> Vec<(TokenKind, &str)> 
     lex(text, 0, opts).unwrap().into_iter().map(|t| (t.kind, t.text(text))).collect()
 }
 
-// `empty` and `fail` are re-exported for parsers in other modules that build on
-// the same dispatch style; keep the imports used.
-#[allow(dead_code)]
-fn _unused(i: &mut Input<'_>) -> PResult<()> {
-    empty.parse_next(i)?;
-    fail.parse_next(i)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -682,7 +643,7 @@ mod tests {
         let src = "ls\n# c\n| length # trailing\n";
         let toks = lex_debug(src, LexOptions::BLOCK);
         let kinds: Vec<_> = toks.iter().map(|t| t.0).collect();
-        assert_eq!(kinds, vec![Item, Comment, Pipe, Item, Comment, Eol, Eof]);
+        assert_eq!(kinds, vec![Item, Eol, Comment, Eol, Pipe, Item, Comment, Eol, Eof]);
     }
 
     #[test]

@@ -669,7 +669,7 @@ impl<'a> Formatter<'a> {
                 self.expr(&a.item);
             }
             ExprKind::Let(b) | ExprKind::Mut(b) | ExprKind::Const(b) => {
-                self.word(self.text(b.keyword));
+                self.word(e.kind.keyword().unwrap_or("let"));
                 match &b.ty {
                     Some(ty) => self.word(&format!("{}: {}", b.name.item, self.text(ty.span))),
                     None => self.word(b.name.item),
@@ -719,7 +719,7 @@ impl<'a> Formatter<'a> {
             }
             ExprKind::ExportEnv(x) => {
                 self.word("export-env");
-                self.braced_block(&x.body, Span::new(x.keyword.end, span.end));
+                self.braced_block(&x.body, Span::new(span.start + "export-env".len(), span.end));
             }
             ExprKind::If(i) => {
                 self.word("if");
@@ -749,7 +749,7 @@ impl<'a> Formatter<'a> {
             }
             ExprKind::Loop(l) => {
                 self.word("loop");
-                self.braced_block(&l.body, Span::new(l.keyword.end, span.end));
+                self.braced_block(&l.body, Span::new(span.start + "loop".len(), span.end));
             }
             ExprKind::Break => self.word("break"),
             ExprKind::Continue => self.word("continue"),
@@ -762,7 +762,7 @@ impl<'a> Formatter<'a> {
             ExprKind::Try(t) => {
                 self.word("try");
                 let body_end = t.handlers.first().map_or(span.end, |h| h.keyword.start);
-                self.braced_block(&t.body, Span::new(t.keyword.end, body_end));
+                self.braced_block(&t.body, Span::new(span.start + "try".len(), body_end));
                 for h in &t.handlers {
                     self.word(self.text(h.keyword));
                     self.expr(&h.body);

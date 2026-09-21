@@ -60,6 +60,10 @@ cargo run --features serde --example parse -- --json script.nu
 echo 'ls | length' | cargo run --example parse
 ```
 
+Every command-line tool in the repository (this example, `nufmt`, the engine
+bridge, the benchmarks and the comparison scripts) is documented with its
+flags and examples in [`src/docs/how-to.md`](src/docs/how-to.md).
+
 ## Public API
 
 | Item | Purpose |
@@ -257,8 +261,9 @@ Deeply nested brackets recurse on the stack, one frame per nesting level, as
   (requires a local Nushell checkout; see its README);
   `tools/nushell-harness-release` builds the benchmark against the crates.io
   release for cross-version tables.
-* `src/docs/` — how the parser works, chapter by chapter, plus the Nushell
-  integration plan; also rendered by `cargo doc` under `nu_winnow_parser::docs`.
+* `src/docs/` — how the parser works, chapter by chapter, a how-to for every
+  tool, and the Nushell integration plan; also rendered by `cargo doc` under
+  `nu_winnow_parser::docs`.
 * Unit tests in each module (lexer, literals, flatten, spans, errors).
 
 Run everything with `cargo test`; run the benchmarks with `cargo bench`.

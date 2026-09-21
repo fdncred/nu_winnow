@@ -37,5 +37,8 @@ pub mod testing_and_tools {}
 #[doc = include_str!("10-contributing.md")]
 pub mod contributing {}
 
+#[doc = include_str!("how-to.md")]
+pub mod how_to {}
+
 #[doc = include_str!("nushell-integration-plan.md")]
 pub mod nushell_integration_plan {}

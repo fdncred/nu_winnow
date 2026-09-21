@@ -1,18 +1,16 @@
-# 03 Streams, errors and shared state
+# 03 Streams, cursors, errors and shared state
 
-Files: `src/input.rs`, `src/error.rs`, `src/parser/mod.rs`.
+Files: `src/input.rs`, `src/parser/cursor.rs`, `src/error.rs`, `src/parser/mod.rs`.
 
-## Two winnow streams
+## One winnow stream, one cursor
 
 winnow parsers are functions `fn(&mut Stream) -> Result<Output, ErrMode<E>>`.
-This crate uses two stream types:
+The crate uses winnow for the *character level*: the lexer and the literal
+parsers work on `Input`:
 
 ```rust,ignore
 /// Character-level stream with absolute positions.
 pub type Input<'a> = Stateful<LocatingSlice<&'a str>, Base>;
-
-/// Token-level stream with a copyable state `S`.
-pub type Tokens<'t, S> = Stateful<TokenSlice<'t, Token>, S>;
 ```
 
 `Input` wraps a `&str` slice in winnow's `LocatingSlice` (which tracks the
@@ -26,27 +24,42 @@ pub fn pos(i: &Input<'_>) -> usize { i.state.0 + i.current_token_start() }
 pub fn span_from(i: &Input<'_>, start: usize) -> Span { Span::new(start, pos(i)) }
 ```
 
-`Tokens` wraps a `TokenSlice<Token>` (winnow's slice-of-tokens stream) and
-carries the parser handle `St` as its state, so any token-level parser can
-reach the source text and the shared state through `i.state`. The concrete
-alias in `src/parser/expr.rs` is:
+The *token level* does not need combinators: a statement is a short list of
+items that is walked once, left to right. That is done with a plain
+`Cursor` (`src/parser/cursor.rs`), a slice of tokens, a position, and the
+byte offset where the slice ends:
 
 ```rust,ignore
-pub type Toks<'t, 's, 'a> = Tokens<'t, St<'s, 'a>>;
-pub fn toks<'t, 's, 'a>(st: St<'s, 'a>, tokens: &'t [Token]) -> Toks<'t, 's, 'a> {
-    Stateful { input: TokenSlice::new(tokens), state: st }
+#[derive(Clone, Copy)]
+pub struct Cursor<'t> {
+    tokens: &'t [Token],
+    pos: usize,
+    end: usize,      // byte offset just past the last token, for errors at the end
 }
 ```
 
-Helpers over `Toks` in `expr.rs` are the vocabulary of every statement parser:
-`peek_token`, `at_end`, `expect_item(i, "what")`, `expect_end`, `rest_span`,
-`items(tokens)` (strip the `Eof`), `with_eof(slice)` (copy a slice and append
-an `Eof`).
+Its methods are the vocabulary of every statement parser:
+
+| Method | Purpose |
+| --- | --- |
+| `peek()`, `next()`, `at_end()`, `rest()` | Walk the tokens |
+| `expect_item("what")` | The next `Item`, or `expected what` at the next token (or at `end` when the input ran out) |
+| `expect_end()` | `ExtraTokens` unless everything was consumed |
+| `here()`, `end_span()` | The span of the next token / the empty span at the end |
+| `slice(a..b)`, `remaining()` | An independent cursor over part of the tokens, ending where the next token starts |
+| `position()`, `reset(pos)` | Save and restore a position (used by the match-guard parser to skip to `=>`) |
+| `rest_span()` | Consume what is left and return its span |
+| `Cursor::from_lexed(&tokens)` | A cursor over lexer output, whose last token is `Eof` |
+
+Because a cursor knows where its slice ends, "expected block" after `if $x`
+points just past `$x` even though there is no token there. The `Eof` token
+the lexer produces is only used to seed that end position; parsers never see
+it.
 
 ## `Diagnostic` is the winnow error type
 
 Instead of `ContextError`, every parser returns `PResult<T> = ModalResult<T,
-Diagnostic>`. `Diagnostic` implements winnow's traits for both streams
+Diagnostic>`. `Diagnostic` implements winnow's traits for `Input`
 (`src/input.rs`):
 
 ```rust,ignore
@@ -75,10 +88,10 @@ text, and it propagates through `?` and combinators like any winnow error.
 `ErrMode::Backtrack` and `ErrMode::Cut` keep their normal meaning:
 
 * `backtrack(d)` — this branch does not apply; `alt`/`opt` may try another.
-  Used sparingly (e.g. `looks_like_value` probing a range).
-* `cut(d)` — a real syntax error; no alternative will be tried. Almost every
-  error in the parser is a cut, because Nushell's grammar is decided by the
-  first character of an item, not by trial and error.
+  Only the character-level parsers use it.
+* `cut(d)` — a real syntax error; no alternative will be tried. Every error
+  in the token-level parsers is a cut, because Nushell's grammar is decided
+  by the first character of an item, not by trial and error.
 
 ```rust
 use nu_winnow_parser::{parse, ErrorKind};
@@ -114,7 +127,7 @@ pub struct Shared {
 
 `St` is `Copy`, so parser functions take it by value and closures capture it
 freely; the `RefCell` gives interior mutability without threading `&mut`
-through winnow closures. Methods you will use:
+through every function. Methods you will use:
 
 | Method | Purpose |
 | --- | --- |
@@ -122,36 +135,31 @@ through winnow closures. Methods you will use:
 | `st.lex_span(span, opts)` | Lex a region of the source (the standard way to re-lex an item's interior) |
 | `st.comment(span)`, `st.comments_from(&tokens)` | Record comments found while parsing nested constructs |
 | `st.error(d)` | Record a recovered error (block-level recovery only) |
-| `st.checkpoint()` / `st.rollback(cp)` | Snapshot and undo recorded comments and diagnostics around a speculative parse |
 | `st.is_known_command(name)`, `st.is_command_prefix(word)`, `st.is_declared_command(name)`, `st.declare_command(name)` | Command-name knowledge for multi-word heads |
 | `st.push_scope()` / `st.pop_scope()` | Declaration scopes for closures, blocks and subexpressions |
 
-### Speculation must be undone
+### No speculation
 
-Some code paths try one parse and fall back to another: `range()` parses each
-bound with `value(Hint::Number)` and gives up if any bound fails, and
-`looks_like_value` probes whether an item is a range. If the attempted parse
-walked into a subexpression, it may have recorded comments (or, with block
-recovery, diagnostics) that must not survive the fallback. The pattern is:
+Nothing in the parser tries one parse and falls back to another. Every
+decision that nu-parser makes by "try it and see" is made here by looking at
+the text first: `cellpath::is_range_syntax` decides whether an item is a
+range before any bound is parsed, `value::looks_like_value` decides whether a
+command head starts a math expression, and the `{ ... }` probe (chapter 06)
+decides record, closure or block from two tokens. The consequence is that
+comments and diagnostics can be recorded as soon as they are seen, with no
+snapshot to undo, and an error is always reported for the construct the user
+wrote (a bad range bound says "expected number", not "unknown command").
 
-```rust,ignore
-let cp = st.checkpoint();
-match value(st, bound_span, Hint::Number) {
-    Ok(e) => e,
-    Err(_) => { st.rollback(cp); return None; }
-}
-```
-
-Comments are also de-duplicated at the end of the parse (sorted and
-`dedup`ed), which makes double collection harmless in the rare case a region
-is parsed twice.
+Comments are de-duplicated at the end of the parse (sorted and `dedup`ed),
+so the rare region that is lexed twice, such as a record key probed and then
+parsed, is harmless.
 
 ## Error recovery
 
-Recovery happens in exactly one place: `parse_block_tokens` in
+Recovery happens in exactly one place: `parse_block` in
 `src/parser/block.rs`. When a pipeline fails to parse it records the
-diagnostic, resets the token stream to the pipeline's start, skips to the
-next `Eol`, `;` or `Eof`, and emits a pipeline whose single element is
+diagnostic, resets the cursor to the pipeline's start, skips to the next
+`Eol` or `;`, and emits a pipeline whose single element is
 `ExprKind::Garbage` covering the skipped span. Because every block (closure
 body, `if` body, subexpression, `let` value) goes through the same function,
 an error inside a nested block does not fail the enclosing statement:
@@ -172,10 +180,9 @@ match &def.kind {
 }
 ```
 
-A corollary for contributors: **never speculatively parse a block** (try
-block, fall back to something else) without a checkpoint, because the block's
-errors are recorded, not returned. The match-arm body parser is the one place
-that does this and it uses `checkpoint`/`rollback`.
+A corollary for contributors: a block that fails to parse still returns
+`Ok`, with its errors recorded in `Shared`. So decide *before* parsing a
+block whether the item is a block; never parse one to find out.
 
 `parse` returns `Err` if any diagnostic was recorded; `parse_lenient` returns
 the partial tree together with the diagnostics.

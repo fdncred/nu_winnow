@@ -382,7 +382,7 @@ impl<'a> Printer<'a> {
                 });
             }
             ExprKind::Let(b) | ExprKind::Mut(b) | ExprKind::Const(b) => {
-                let kw = self.text(b.keyword);
+                let kw = e.kind.keyword().unwrap_or("let");
                 let ty = b.ty.as_ref().map(|t| format!(" : {}", self.text(t.span))).unwrap_or_default();
                 self.line(format_args!("{kw} {}{ty} {span}", b.name.item));
                 if let Some(value) = &b.value {

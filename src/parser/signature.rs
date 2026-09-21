@@ -9,8 +9,9 @@ use crate::input::{PResult, cut};
 use crate::lexer::{LexOptions, Token, TokenKind};
 use crate::span::{Span, Spanned};
 
-use super::St;
-use super::value::{self, Hint, is_identifier};
+use super::cellpath::is_identifier;
+use super::value::{self, Hint};
+use super::{St, strings};
 
 /// Parse a `[...]` or `(...)` signature item.
 pub fn parse_signature<'a>(st: St<'_, 'a>, span: Span) -> PResult<Signature<'a>> {
@@ -368,7 +369,7 @@ fn named_type_params<'a>(st: St<'_, 'a>, span: Span) -> PResult<Vec<TypeField<'a
         if name_text == "," || name_text == ":" {
             return Err(cut(Diagnostic::expected("field name", name_tok.span)));
         }
-        let name = value::string_lit(st, name_tok.span)?.value;
+        let name = strings::string_lit(st, name_tok.span)?.value;
         idx += 1;
         let ty = if idx < items.len() && st.tok(items[idx]) == ":" {
             idx += 1;
@@ -421,6 +422,6 @@ pub fn parse_io_types<'a>(st: St<'_, 'a>, span: Span) -> PResult<Vec<IoType<'a>>
 
 /// The quoted or bare name of a definition (`def "foo bar"`), without quotes.
 pub fn definition_name<'a>(st: St<'_, 'a>, span: Span) -> PResult<Spanned<Cow<'a, str>>> {
-    let lit = value::string_lit(st, span)?;
+    let lit = strings::string_lit(st, span)?;
     Ok(Spanned::new(lit.value, span))
 }

@@ -1,6 +1,7 @@
 # 06 Values and literals
 
-Files: `src/parser/value.rs`, `src/parser/literal.rs`.
+Files: `src/parser/value.rs`, `src/parser/strings.rs`, `src/parser/cellpath.rs`,
+`src/parser/collections.rs`, `src/parser/literal.rs`.
 
 `value(st, span, hint)` turns the text of one item into an `Expr`. It is
 called for every argument, operand, list element, record value, range bound,
@@ -11,19 +12,20 @@ the crate. It mirrors nu-parser's `parse_value`.
 
 ```rust,ignore
 pub fn value<'a>(st: St<'_, 'a>, span: Span, hint: Hint) -> PResult<Expr<'a>> {
-    match first_byte {
-        b'$' => return dollar(st, span),                   // $var, $x.a, $.a, $"..", $'..', ranges
-        b'(' => return paren(st, span, hint),              // range, signature, or (subexpr)[.members]
-        b'{' => return brace(st, span, hint),              // record | closure | block
-        b'[' => return match hint { Hint::Signature => .., _ => full_cell_path(st, span, false) },
-        b'r' if text starts with "r#" => return literal::raw_string(st, span),
-        _ => {}
-    }
-    match hint {
-        Hint::Number => literal::number(st, span),
-        Hint::String => string(st, span),
-        Hint::Block | Hint::Closure | Hint::Signature => Err(..),   // those must start with { or [
-        Hint::Any => any_value(st, span, text),
+    match text.as_bytes() {
+        [] => Err(cut(Diagnostic::expected("value", span))),
+        [b'$', ..] => cellpath::dollar(st, span),          // $var, $x.a, $.a, $"..", $'..', ranges
+        [b'(', ..] => cellpath::paren(st, span, hint),     // range, signature, or (subexpr)[.members]
+        [b'{', ..] => brace(st, span, hint),               // record | closure | block
+        [b'[', ..] if hint == Hint::Signature => Ok(signature_placeholder(span)),
+        [b'[', ..] => cellpath::full_cell_path(st, span, false),
+        [b'r', b'#', ..] => literal::raw_string(st, span),
+        _ => match hint {
+            Hint::Number => literal::number(st, span),
+            Hint::String => strings::string(st, span),
+            Hint::MatchBody | Hint::Closure | Hint::Signature => Err(..),   // those must start with { or [
+            Hint::Any => any_value(st, span, text),
+        },
     }
 }
 ```
@@ -34,15 +36,19 @@ rather than typing:
 | Hint | Used for | Effect |
 | --- | --- | --- |
 | `Any` | most arguments | full literal search |
-| `Block` | bodies of `if`, `for`, `def`, ... | `{}` is a block; a leading `|` is an error |
 | `Closure` | `catch`/`finally` handlers | `{}` is a closure even if it looks like a block |
+| `MatchBody` | the body of a `match` arm | `{}` is a block, unless it is written as a closure (`{|x| ..}`) or a record (`{a: 1}`) |
 | `Number` | range bounds | numbers only (plus `$` and `(` forms) |
 | `String` | record keys, `def`/`use`/`module` names | bare or quoted string, `$var`, `(expr)`, interpolation |
 | `Signature` | (reserved) | |
 
+Statement bodies (`if`, `for`, `def`, ...) do not go through `value` at all:
+`statement::block_item` calls `block_body` directly, which rejects a leading
+`|`.
+
 `any_value` tries, in nu's order: `null`/`true`/`false`, binary (`0x[`, `0o[`,
-`0b[`), range (only if the text contains `..` and does not start with `...`),
-filesize, duration, datetime, int, float, and finally string. The order
+`0b[`), range (only if `cellpath::is_range_syntax` says the text has the shape
+of one), filesize, duration, datetime, int, float, and finally string. The order
 matters: `1..3` must be tested as a range before `1.` could be read as a
 float, and `1kb` as a filesize before `1` as an int. A matched unit with a
 bad number (`1..2sec`) is an error, not a fallback, as in nu.
@@ -89,7 +95,7 @@ assert_eq!(kinds, vec![
 let _ = (DurationUnit::Hour, FilesizeUnit::KiB);
 ```
 
-## Strings
+## Strings (`strings.rs`)
 
 `string()` decides between a raw string, a bare interpolation (a bare word
 containing `(`, e.g. `foo(1 + 1)bar`) and a plain literal. `string_lit`
@@ -105,11 +111,11 @@ opens a subexpression in which quotes and parentheses nest, `\(` is a literal
 in double-quoted strings, and each `( ... )` becomes a `Subexpression`
 expression. Text parts are unescaped for double quotes only.
 
-## `$` expressions and cell paths
+## `$` expressions and cell paths (`cellpath.rs`)
 
 `dollar` orders the cases as nu does: `$"`/`$'` → interpolation; `$.` → a
-`CellPath` literal (`$.` alone is the empty path); a text containing `..` →
-try a range; otherwise `full_cell_path`.
+`CellPath` literal (`$.` alone is the empty path); a text with the shape of a
+range (`is_range_syntax`) → range; otherwise `full_cell_path`.
 
 `full_cell_path` re-lexes the item with `CELL_PATH` (so `.`, `?` and `!` are
 split off) and parses the head token (`$var`, `(subexpr)`, `[list]` or
@@ -136,13 +142,16 @@ match &ast.block.pipelines[0].elements[0].expr.kind {
 
 ## Ranges
 
-`range()` works on the item text: it finds the `..` occurrences at
-parenthesis depth zero (one for `a..b`, two for `a..s..b`), reads the operator
-(`..`, `..<`, `..=`), and parses each bound with `value(.., Hint::Number)`,
-which admits numbers, `$vars`, cell paths and `(subexpressions)`. Any failure
-means "not a range" and the caller falls through to the next literal kind (so
-`cd ..` and `a..b` are strings). The function is wrapped in
-`checkpoint`/`rollback` because bounds may contain subexpressions.
+Two functions share the work. `is_range_syntax(text)` decides, without
+parsing, whether an item *is* a range: it finds the `..` occurrences at
+parenthesis depth zero (one for `a..b`, two for `a..s..b`) and checks that
+every bound present is number-like (an int, a float, a `$` expression or a
+parenthesised subexpression). `cd ..` and `a..b` fail that test and fall
+through to the next literal kind, as in nu. `range()` then parses a text that
+passed: it reads the operator (`..`, `..<`, `..=`) and each bound with
+`value(.., Hint::Number)`. Because the shape was checked first, an error in a
+bound (`1..(1 +)`) is reported as an error in the range rather than turning
+the item into a string.
 
 ## `{ ... }`: record, closure or block
 
@@ -164,9 +173,10 @@ So `{ print hi }` in argument position is a closure, `{}` is a record, and
 `if true { }` gets a block. `closure()` lexes the body with `BLOCK`, takes a
 leading `|...|` as the parameter list (parsed by `signature::parse_signature_inner`
 on the text between the pipes) or `||` as empty parameters, pushes a
-declaration scope and parses the rest with `parse_block_tokens`.
+declaration scope and parses the rest with `parse_block`. The parameter list
+may start on a later line than the `{`.
 
-## Lists, tables, records
+## Lists, tables, records (`collections.rs`)
 
 * `list_or_table`: lex with `LIST`; if the tokens are `[..]` `;` `[..]...`,
   it is a table whose rows are lists without spreads; otherwise a list.

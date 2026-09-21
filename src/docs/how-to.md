@@ -1,0 +1,330 @@
+# How to use the tools in this repository
+
+Everything here is driven from the command line. This page lists each tool,
+its parameters, and a few things to try. All commands are run from the
+repository root unless a `cd` is shown.
+
+| Tool | What it is | Build |
+| --- | --- | --- |
+| `parse` | Example binary: dump, check, flatten or JSON-serialise Nushell source | `cargo build --release --example parse` |
+| `nufmt` | Example binary: a formatter built on the AST | `cargo build --release --example nufmt` |
+| `cargo test` | Unit, integration, corpus, formatter and doc tests | — |
+| `cargo bench` | Criterion benchmarks of the parser and lexer | — |
+| `bench-vs-nu-parser` | Times `nu-parser` and this crate on the same files (needs a Nushell checkout) | `cd tools/nushell-harness && cargo build --release` |
+| `bridge` | Parses with this crate, lowers into `nu-protocol` and runs on the Nushell engine | same as above |
+| `tools/scripts/*.nu` | Nushell scripts that compare this parser with `nu-check` and `ast --flatten` | need `nu` 0.115.2 and the `parse` example |
+
+## The `parse` example
+
+```text
+parse [--check] [--summary] [--flat] [--json] [--quiet] [FILE|DIR ...]
+```
+
+With no flag it prints the tree of each file, one node per line with its
+span; with no file it reads standard input.
+
+| Parameter | Effect |
+| --- | --- |
+| `FILE` | Parse this file (any number of files) |
+| `DIR` | Parse every `.nu` file below the directory, recursively |
+| (stdin) | With no file, parse what is piped in |
+| `--check` | Do not print trees; report each file that has diagnostics, then a one-line summary with bytes, time and throughput |
+| `--summary` | Print node counts per kind and the parse time instead of the tree |
+| `--flat` | Print `flatten()` output: one `start<TAB>end<TAB>shape` row per classified span |
+| `--json` | Print the AST as JSON (requires `--features serde`) |
+| `--quiet`, `-q` | With `--check`, print only the summary line |
+
+The environment variable `NU_WINNOW_COMMANDS=path` names a file with one
+command name per line; those names are added to the built-in command table so
+that, for example, standard-library commands such as `assert equal` resolve as
+one multi-word head. `tools/scripts/std_commands.txt` is such a file.
+
+Things to try:
+
+```text
+# The tree of a snippet, from stdin.
+echo 'ls | where size > 1kb | get name' | cargo run --release --example parse
+
+# The tree of a file, with spans.
+cargo run --release --example parse -- tests/corpus/kitchen_sink.nu
+
+# What a syntax highlighter would see.
+cargo run --release --example parse -- --flat tests/corpus/std_log.nu | head
+
+# The AST as JSON, for another program.
+cargo run --release --features serde --example parse -- --json tests/corpus/std_dirs.nu | head -40
+
+# Parse a whole tree of scripts and report the ones with errors.
+cargo run --release --example parse -- --check ~/src/nu_scripts ~/src/nushell/crates/nu-std tests/corpus
+
+# The same, summary line only, with the standard-library commands known.
+NU_WINNOW_COMMANDS=tools/scripts/std_commands.txt \
+  ./target/release/examples/parse --check --quiet ~/src/nushell/crates/nu-std
+
+# Node counts and timing for one file.
+cargo run --release --example parse -- --summary tests/corpus/doc_config.nu
+
+# An error, rendered with a source excerpt and the grammar context.
+echo 'def foo [x:] { }' | cargo run --release --example parse
+```
+
+`--check` exits with status 1 if any file had a diagnostic, so it can gate a
+CI job.
+
+## The `nufmt` example
+
+```text
+nufmt [--write|-w] [--check] [FILE|DIR ...]
+```
+
+| Parameter | Effect |
+| --- | --- |
+| `FILE`, `DIR` | Format these files (directories recursively, `.nu` files only) |
+| (stdin) | With no file, format what is piped in and print the result |
+| (no flag) | Print the formatted source to standard output |
+| `--write`, `-w` | Rewrite each file in place |
+| `--check` | Print the names of files that would change and exit with status 1 if there are any |
+
+Things to try:
+
+```text
+# Format a snippet.
+echo 'ls|where size>1kb|get name' | cargo run --release --example nufmt
+
+# See what the formatter would do to a file, without touching it.
+cargo run --release --example nufmt -- tests/corpus/kitchen_sink.nu | diff tests/corpus/kitchen_sink.nu - | head
+
+# Check a directory in CI.
+cargo run --release --example nufmt -- --check tests/corpus
+
+# Format a copy in place.
+cp tests/corpus/std_log.nu /tmp/std_log.nu && cargo run --release --example nufmt -- --write /tmp/std_log.nu
+```
+
+The formatter is an example of a consumer: `examples/nufmt/format.rs` walks
+the tree, copies atoms from their spans, normalises whitespace, re-indents
+blocks and multi-line collections and re-emits comments by position. Its
+tests (`tests/nufmt.rs`) require formatting to be idempotent, to keep every
+comment, and to produce a tree equal to the original's.
+
+## Tests
+
+```text
+cargo test                              # everything, default features
+cargo test --all-features               # also the serde derives
+cargo test --test syntax                # one construct per test, with error cases
+cargo test --test corpus                # every file in tests/corpus must parse cleanly
+cargo test --test nufmt                 # formatter idempotency and structure preservation
+cargo test --doc                        # the `rust` blocks in src/docs and the README
+cargo test --lib lexer                  # unit tests of one module
+cargo test --test syntax -- if_forms    # one test by name
+```
+
+Two environment variables extend the corpus test:
+
+| Variable | Effect |
+| --- | --- |
+| `NU_WINNOW_CORPUS=/path` | Also parse every `.nu` file below this directory (for example a `nu_scripts` checkout) |
+| `NU_WINNOW_CORPUS_SKIP=a,b` | Skip files whose path contains one of these substrings |
+
+```text
+NU_WINNOW_CORPUS=~/src/nu_scripts cargo test --test corpus -- --nocapture
+```
+
+The usual hygiene before a change is finished:
+
+```text
+cargo fmt
+cargo clippy --all-targets --all-features
+cargo test --all-features
+```
+
+## Benchmarks
+
+### Criterion (`benches/parse.rs`)
+
+```text
+cargo bench                             # all groups
+cargo bench -- parse/                   # whole-file parses: kitchen_sink, std_iter, std_assert, large_file
+cargo bench -- snippets/                # small programs: pipeline, math, record, closure, def
+cargo bench -- lexer/                   # the lexer alone
+```
+
+Criterion prints a time per iteration and the change against the previous
+run; the HTML report is written under `target/criterion/`. Run it on a quiet
+machine, and run it twice when comparing two versions of the code: the first
+run stores the baseline.
+
+### Throughput with the example
+
+`parse --check` prints bytes, time and MB/s for a whole directory, which is
+the quickest way to compare two builds:
+
+```text
+cargo build --release --example parse
+cp target/release/examples/parse /tmp/parse-before
+# ... make a change, rebuild ...
+/tmp/parse-before --check --quiet ~/src/nu_scripts
+./target/release/examples/parse --check --quiet ~/src/nu_scripts
+```
+
+### Against `nu-parser` (`tools/nushell-harness`)
+
+This crate links the real Nushell crates by path from a checkout at
+`../../../nushell` (see its `Cargo.toml`); the first build takes several
+minutes.
+
+```text
+cd tools/nushell-harness
+cargo run --release --bin bench-vs-nu-parser -- [--iters N] [--std] FILE|DIR ...
+```
+
+| Parameter | Effect |
+| --- | --- |
+| `FILE`, `DIR` | The files to time (directories recursively) |
+| `--iters N` | Parse each file N times and report the total (default 1) |
+| `--std` | Load the standard library into the engine first, so `use std/...` resolves and `nu-parser` also parses the imported modules |
+
+Without `--std` both parsers see the same bytes and nothing else, which is
+the fair comparison. Examples:
+
+```text
+cd tools/nushell-harness
+cargo run --release --bin bench-vs-nu-parser -- ~/src/nushell/crates/nu-std
+cargo run --release --bin bench-vs-nu-parser -- --iters 10 ../../tests/corpus
+cargo run --release --bin bench-vs-nu-parser -- --std ~/src/nushell/crates/nu-std
+```
+
+`tools/nushell-harness-release` is the same benchmark compiled against the
+crates.io release of `nu-parser` (pinned in its `Cargo.toml`), so two Nushell
+versions can be put side by side:
+
+```text
+cd tools/nushell-harness-release
+cargo run --release -- ~/src/nushell/crates/nu-std
+```
+
+## The engine bridge (`tools/nushell-harness`, `bridge`)
+
+```text
+cd tools/nushell-harness
+cargo run --release --bin bridge -- [--demo] [--compare] [--file FILE] ['script']
+```
+
+| Parameter | Effect |
+| --- | --- |
+| `'script'` | Parse the script with this crate, lower it into `nu-protocol`, evaluate it on `nu-engine`, print the value |
+| `--file FILE` | Take the script from a file instead |
+| `--compare` | Also run the same script through `nu-parser` and print both results |
+| `--demo` | Run the built-in suite of 22 scripts through both front ends and report whether every result agrees |
+
+Things to try:
+
+```text
+cd tools/nushell-harness
+cargo run --release --bin bridge -- --demo
+cargo run --release --bin bridge -- '[3 1 2] | sort | each {|x| $x * 2 }'
+cargo run --release --bin bridge -- --compare 'def add [a: int, b: int] { $a + $b }; add 1 2'
+cargo run --release --bin bridge -- --compare --file /tmp/script.nu
+```
+
+The bridge supports custom commands with flags, closures with captures,
+`if`/`match`/`for`/`while`/`loop`/`try`, row conditions and external calls;
+it does not support the module system (`use`, `module`, `export`) yet. See
+`tools/nushell-harness/README.md` and `nushell-integration-plan.md`.
+
+## Comparing with Nushell itself (`tools/scripts`)
+
+The scripts are written in Nushell (0.115.2) and use the release build of the
+`parse` example, so build it first with `cargo build --release --example
+parse`.
+
+### `nucheck-compare.nu`
+
+```text
+nu tools/scripts/nucheck-compare.nu [--details] DIR...
+```
+
+Runs `nu-check` and `parse --check` on every `.nu` file and prints the
+files where the verdicts differ. A file that nu accepts and this parser
+rejects is a parser bug. The other direction is usually a semantic error
+that `nu-check` reports and a syntax-only parser cannot (a missing module, a
+type mismatch). With `--details` the script returns the whole table for
+further querying in Nushell.
+
+```text
+nu tools/scripts/nucheck-compare.nu ~/src/nushell/crates/nu-std
+nu tools/scripts/nucheck-compare.nu ~/src/nu_scripts ~/src/nushell/crates/nu-std
+nu -c 'nu tools/scripts/nucheck-compare.nu --details ~/src/nushell/crates/nu-std | where nu != ours'
+```
+
+### `flatcmp.nu`
+
+```text
+nu tools/scripts/flatcmp.nu [--commands FILE] FILE...
+```
+
+Compares nu's `ast --flatten` classification of every token with this
+crate's `flatten()`, after mapping both to a coarse class alphabet (call,
+string, var, literal, op, flag, delim, sig), and prints each differing run
+with its line. Pass `--commands tools/scripts/std_commands.txt` so
+standard-library commands resolve as multi-word names, as they do inside nu.
+
+```text
+nu tools/scripts/flatcmp.nu --commands tools/scripts/std_commands.txt tests/corpus/std_log.nu
+nu -c 'nu tools/scripts/flatcmp.nu --commands tools/scripts/std_commands.txt ...(glob ~/src/nushell/crates/nu-std/**/*.nu)'
+```
+
+The residual differences are the documented signature-dependent ones: `get
+a.0` is a cell path only because `get` declares that shape, attribute lines
+are opaque to nu's flatten, and `$.` is a cell-path literal here.
+
+### `gen-std-commands.nu`
+
+```text
+nu tools/scripts/gen-std-commands.nu [STD_DIR] | save -f tools/scripts/std_commands.txt
+```
+
+Regenerates the list of standard-library exports (bare and module-prefixed)
+that the other scripts and `NU_WINNOW_COMMANDS` use.
+
+## Cargo features
+
+| Feature | Default | Effect |
+| --- | --- | --- |
+| `builtin-commands` | on | Embed Nushell's built-in command names so multi-word heads such as `str trim` resolve. Without it `ParseConfig::new()` knows no commands and every head is one word. |
+| `serde` | off | Derive `Serialize` for the AST and diagnostics; enables `parse --json` |
+
+```text
+cargo build --no-default-features          # smallest library
+cargo build --features serde
+cargo doc --open                           # the API plus these chapters under `docs`
+```
+
+## Using the library from another crate
+
+```rust
+use nu_winnow_parser::{parse, parse_with, parse_lenient, ParseConfig, ast::ExprKind, flatten::flatten};
+
+// Strict: any diagnostic is an error.
+let ast = parse("ls | where size > 1kb | get name").unwrap();
+assert_eq!(ast.block.pipelines[0].elements.len(), 3);
+
+// With extra command names, so `my cmd` is one head.
+let config = ParseConfig::new().add_commands(["my cmd"]);
+let ast = parse_with("my cmd --flag", &config).unwrap();
+match &ast.block.pipelines[0].elements[0].expr.kind {
+    ExprKind::Call(call) => assert_eq!(call.head.name, "my cmd"),
+    other => panic!("{other:?}"),
+}
+
+// Lenient: keep the partial tree and every diagnostic.
+let (ast, diagnostics) = parse_lenient("ls\nlet = 1\npwd", &config);
+assert_eq!(diagnostics.len(), 1);
+println!("{}", diagnostics[0].render(ast.source, Some("script.nu")));
+
+// Classified spans for highlighting.
+for (span, shape) in flatten(&ast) {
+    let _ = (span.slice(ast.source), shape);
+}
+```

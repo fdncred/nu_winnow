@@ -31,9 +31,9 @@ Two things are unusual compared with a classical lexer:
 2. There is no separate keyword or operator token. `def`, `+`, `==` and
    `not-in` are all items; the parser classifies them by text and position.
 
-The `Eof` sentinel is important: every token slice handed to a parser ends
-with an `Eof` whose span is the end of that slice, so "expected X" errors have
-a position even when the input ran out (see chapter 03).
+The `Eof` token records where the text ended; the parser turns it into the
+end position of its `Cursor`, so "expected X" errors have a position even
+when the input ran out (see chapter 03).
 
 ## `LexOptions`
 
@@ -158,6 +158,8 @@ State tracked while scanning:
   runs to the end of the line.
 * Raw strings `r#'...'#` are scanned by `raw_string_end`, which counts the
   hashes and finds the matching `'#...#`.
+* Closing brackets go through `close_bracket`, which pops the matching
+  opener or reports the mismatch.
 * A `|` directly after a redirection prefix (`e>`, `o+e>`) is consumed into
   the item, giving the `e>|` tokens.
 
@@ -171,11 +173,9 @@ Once the item's extent is known, `classify` turns the exact spellings of
 assignment and redirection operators into their token kinds, and the input is
 advanced with `i.next_slice(off)`.
 
-## Pipe continuation
+## Pipe continuation is not the lexer's job
 
-`push_token` implements one context-sensitive rule at the token level: a `|`
-that follows a newline continues the previous pipeline, and comment lines in
-between are kept while the newlines that would split the pipeline are removed.
+A `|` at the start of a line continues the previous pipeline:
 
 ```text
 ls
@@ -183,10 +183,11 @@ ls
 | length
 ```
 
-lexes as `Item(ls) Comment Pipe Item(length)`: the `Eol` before the comment
-and the one before `|` are gone. This mirrors nu-parser's lexer exactly and is
-what makes leading-pipe style work everywhere without special cases in the
-parser.
+The lexer emits exactly what is there, `Item(ls) Eol Comment Eol Pipe
+Item(length)`, and the block parser (chapter 04) looks ahead over newlines
+and comments for the `|`. nu-parser does this in its lexer by rewriting the
+token list; keeping the lexer context-free makes its output easier to reason
+about and test, and the rule lives next to the other pipeline-layout rules.
 
 ## Where to look when changing the lexer
 
@@ -194,7 +195,7 @@ parser.
   it from the value parser; do not special-case the scanner.
 * New operator spelling that must stand alone (`o>`-like): `classify`.
 * New quoting form: the quote handling in `item` and, if the parser must
-  decode it, `value::string_lit` / `literal::raw_string`.
+  decode it, `strings::string_lit` / `literal::raw_string`.
 * Anything else: write the change as a winnow parser and add a case to
   `token`'s `dispatch!`.
 
