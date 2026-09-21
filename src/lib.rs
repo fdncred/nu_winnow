@@ -13,13 +13,15 @@
 //! assert!(matches!(pipeline.elements[1].expr.kind, ExprKind::Where(_)));
 //! ```
 //!
-//! See [`ast`] for the tree, [`parse_lenient`] for error recovery, and
-//! [`ParseConfig`] for configuring known command names.
+//! See [`ast`] for the tree, [`parse_lenient`] for error recovery,
+//! [`ParseConfig`] for configuring known command names, and [`docs`] for a
+//! chapter-by-chapter description of how the parser works.
 
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
 pub mod ast;
+pub mod docs;
 #[cfg(feature = "builtin-commands")]
 pub mod builtin_commands;
 pub mod error;

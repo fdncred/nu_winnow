@@ -160,7 +160,7 @@ that need declarations or types.
 
 ### Measured against the reference
 
-Three checks were run against Nushell 0.115.2 (see `tools/nu-compat` and the
+Three checks were run against Nushell 0.115.2 (see `tools/nushell-harness` and the
 Nushell scripts in `tools/scripts/`):
 
 * **Accept/reject parity.** Over `nu_scripts` and the standard library (1,599
@@ -173,10 +173,10 @@ Nushell scripts in `tools/scripts/`):
   documented signature-dependent ones (`get content.0` is a cell path only
   because `get` declares that shape), attribute lines (which nu's flatten
   treats as opaque) and `$.` (a cell-path literal here, a delimiter for nu).
-* **Speed.** `tools/nu-compat/bench-vs-nu-parser` times both parsers on the
+* **Speed.** `tools/nushell-harness/bench-vs-nu-parser` times both parsers on the
   same bytes, with `nu-parser` given the full command set as in the shell.
   Two Nushell releases are shown, since 0.115.2 sped up `nu-parser`
-  considerably (`tools/nu-compat-prev` builds the same harness against the
+  considerably (`tools/nushell-harness-release` builds the same harness against the
   crates.io release):
 
   | Corpus | `nu-parser` 0.115.1 | `nu-parser` 0.115.2 | `nu-winnow-parser` | Ratio vs 0.115.1 | Ratio vs 0.115.2 |
@@ -191,7 +191,7 @@ Nushell scripts in `tools/scripts/`):
 
 ### Plugging into Nushell
 
-`tools/nu-compat/src/bin/bridge.rs` is a working MVP: it parses with this
+`tools/nushell-harness/src/bin/bridge.rs` is a working MVP: it parses with this
 crate, lowers the tree into `nu-protocol` structures inside a
 `StateWorkingSet` (resolving declarations, applying signatures, declaring
 variables and custom commands, tracking closure captures), compiles to IR with
@@ -253,8 +253,12 @@ Deeply nested brackets recurse on the stack, one frame per nesting level, as
   optionally every `.nu` file under `NU_WINNOW_CORPUS`.
 * `tests/nufmt.rs` — idempotency and re-parse equivalence of the formatter
   example over the corpus.
-* `tools/nu-compat` — benchmark against `nu-parser` and the engine bridge
-  (requires a local Nushell checkout; see its README).
+* `tools/nushell-harness` — benchmark against `nu-parser` and the engine bridge
+  (requires a local Nushell checkout; see its README);
+  `tools/nushell-harness-release` builds the benchmark against the crates.io
+  release for cross-version tables.
+* `src/docs/` — how the parser works, chapter by chapter, plus the Nushell
+  integration plan; also rendered by `cargo doc` under `nu_winnow_parser::docs`.
 * Unit tests in each module (lexer, literals, flatten, spans, errors).
 
 Run everything with `cargo test`; run the benchmarks with `cargo bench`.
