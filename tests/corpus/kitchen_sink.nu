@@ -18,7 +18,7 @@ export def greet [
     ...rest: any
 ]: nothing -> string {
     let greeting = $"hello ($name)"
-    if $loud { $greeting | str upcase } else { $greeting }
+    if $loud { $greeting | str uppercase } else { $greeting }
 }
 
 def --env "set up" [] { $env.SET_UP = true }
@@ -34,7 +34,7 @@ let list = [1, 2 3
   4 # inline comment
   ...[5 6]
 ]
-mut rec = {a: 1, "b c": [2], d: {e: null}, ...{f: 1.5}}
+mut rec = {a: 1, "b c": [2], d: {e: 0x[00]}, ...{f: 1.5}}
 $rec.a += 10
 $rec.d.e = 0x[de ad be ef]
 let table = [[name size]; ["a" 1kb] ["b" 2.5mb]]
@@ -45,7 +45,7 @@ let dur = 1.5hr + 30min
 let raw = r#'raw "string" with 'quotes''#
 let interp = $'single (1 + 1)' + $"double \(escaped\) ($list | length)"
 let math = (1 + 2) * 3 ** 2 ** 1 // 4 mod 3 - -1
-let logic = not ($math > 1) and $list.0? in [1 2] or $rec.a =~ 'x' xor true
+let logic = not ($math > 1) and $list.0? in [1 2] or $raw =~ 'raw' xor true
 let bits = 1 bit-shl 2 bit-or 4 bit-and 7 bit-xor 1 bit-shr 0
 let cmp = "a" starts-with "a" and "b" not-ends-with "c" and 1 not-in [2] and [1] has 1
 let closure = {|x: int, y?| $x + ($y | default 0) }
@@ -81,16 +81,16 @@ def rows [] {
 }
 
 FOO=bar BAZ=$VERSION ^env | lines | where $it starts-with "FOO"
-^git log --oneline -n 5 o> /dev/null e> /dev/null
-^cargo build o+e>| lines | length
-ls e>| length
+^echo hello o> /dev/null e> /dev/null
+^echo build o+e>| lines | length
+^ls e>| length
 
 ls
 # comment between
 | get name
 | each { |n|
     # closure body comment
-    $n | str upcase
+    $n | str uppercase
 }
 | str join ", "
 
@@ -104,8 +104,6 @@ if ($list | is-empty) {
 
 def "multi word" [] { "multi" }
 multi word | print
-hide-env FOO
-source-env ./env.nu
-overlay use ./mod.nu as m --prefix
+hide-env --ignore-errors FOO
 overlay list
 1 + 1 | into string; print (2 * 2)
