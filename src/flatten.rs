@@ -350,7 +350,10 @@ impl<'a> Visitor<'a> for Flattener {
             }
             ExprKind::ExternalCall(c) => {
                 self.push(c.caret, FlatShape::External);
-                self.push(c.head.span, FlatShape::External);
+                match &c.head.kind {
+                    ExprKind::String(_) => self.push(c.head.span, FlatShape::External),
+                    _ => self.visit_expr(&c.head),
+                }
                 for arg in &c.args {
                     match arg {
                         ExternalArg::Regular(e) => match &e.kind {
@@ -415,7 +418,15 @@ impl<'a> Visitor<'a> for Flattener {
                 self.push(u.keyword, FlatShape::Keyword);
                 self.visit_expr(&u.module);
                 for m in &u.members {
-                    self.push(m.span, FlatShape::String);
+                    match &m.kind {
+                        UseMemberKind::List(names) => {
+                            for n in names {
+                                self.push(n.span, FlatShape::String);
+                            }
+                            self.gaps(m.span, names.iter().map(|n| n.span), FlatShape::List);
+                        }
+                        _ => self.push(m.span, FlatShape::String),
+                    }
                 }
             }
             ExprKind::Module(m) => {

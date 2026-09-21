@@ -6,7 +6,11 @@
 //! cargo run --example parse -- --summary script.nu
 //! echo 'ls | length' | cargo run --example parse   # from stdin
 //! cargo run --features serde --example parse -- --json script.nu
+//! cargo run --example parse -- --flat script.nu    # tab-separated (start, end, shape) rows
 //! ```
+//!
+//! Set `NU_WINNOW_COMMANDS=path` to a file with one command name per line to
+//! make additional (e.g. standard-library) multi-word commands known.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -21,6 +25,7 @@ struct Options {
     check: bool,
     summary: bool,
     json: bool,
+    flat: bool,
     quiet: bool,
     paths: Vec<PathBuf>,
 }
@@ -38,12 +43,18 @@ fn main() -> ExitCode {
             "--check" => opts.check = true,
             "--summary" => opts.summary = true,
             "--json" => opts.json = true,
+            "--flat" => opts.flat = true,
             "--quiet" | "-q" => opts.quiet = true,
             "--help" | "-h" => return usage(),
             _ => opts.paths.push(PathBuf::from(arg)),
         }
     }
-    let config = ParseConfig::new();
+    let mut config = ParseConfig::new();
+    if let Ok(path) = std::env::var("NU_WINNOW_COMMANDS")
+        && let Ok(list) = std::fs::read_to_string(&path)
+    {
+        config = config.add_commands(list.lines().map(str::trim).filter(|l| !l.is_empty()));
+    }
     if opts.paths.is_empty() {
         let mut source = String::new();
         if std::io::stdin().read_to_string(&mut source).is_err() {
@@ -77,6 +88,8 @@ fn report(source: &str, name: &str, config: &ParseConfig, opts: &Options) -> Exi
     let elapsed = start.elapsed();
     if opts.json {
         print_json(&ast);
+    } else if opts.flat {
+        print_flat(&ast);
     } else if opts.summary || opts.check {
         let stats = Stats::of(&ast);
         println!(
@@ -97,6 +110,38 @@ fn report(source: &str, name: &str, config: &ParseConfig, opts: &Options) -> Exi
         let error = nu_winnow_parser::ParseError::new(diagnostics);
         eprint!("{}", error.render(source, Some(name)));
         ExitCode::FAILURE
+    }
+}
+
+/// Print `start\tend\tshape` rows from `flatten`, followed by the outer spans of
+/// signatures (`sig` for `def`/`extern`, `closure-sig` for closure parameters)
+/// so that consumers can group the rows inside them.
+fn print_flat(ast: &Ast<'_>) {
+    use nu_winnow_parser::ast::{Expr, Signature};
+    for (span, shape) in nu_winnow_parser::flatten::flatten(ast) {
+        println!("{}\t{}\t{:?}", span.start, span.end, shape);
+    }
+    struct Sigs(Vec<(usize, usize, &'static str)>);
+    impl<'a> Visitor<'a> for Sigs {
+        fn visit_expr(&mut self, e: &Expr<'a>) {
+            if let ExprKind::Closure(c) = &e.kind
+                && let Some(sig) = &c.params
+            {
+                self.0.push((sig.span.start, sig.span.end, "closure-sig"));
+            }
+            nu_winnow_parser::ast::walk_expr(self, e);
+        }
+        fn visit_signature(&mut self, sig: &Signature<'a>) {
+            if !self.0.iter().any(|(s, _, _)| *s == sig.span.start) {
+                self.0.push((sig.span.start, sig.span.end, "sig"));
+            }
+            nu_winnow_parser::ast::walk_signature(self, sig);
+        }
+    }
+    let mut sigs = Sigs(Vec::new());
+    sigs.visit_block(&ast.block);
+    for (start, end, kind) in sigs.0 {
+        println!("{start}\t{end}\t{kind}");
     }
 }
 

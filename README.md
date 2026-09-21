@@ -156,9 +156,62 @@ IR. This crate is a pure syntactic front end:
 
 Because the item lexer and the expression grammar are the same, the two
 parsers accept the same programs; the only divergences are semantic checks
-that need declarations or types. Integrating this crate into Nushell would
-mean replacing the lexing and syntactic layers of `nu-parser` and keeping its
-name-resolution and type-checking passes as a pass over this AST.
+that need declarations or types.
+
+### Measured against the reference
+
+Three checks were run against Nushell 0.115.2 (see `tools/nu-compat` and the
+Nushell scripts in `tools/scripts/`):
+
+* **Accept/reject parity.** Over `nu_scripts` and the standard library (1,599
+  files) the verdicts agree with `nu-check` except where `nu-check` fails for
+  semantic reasons (missing modules, type mismatches, signature-dependent
+  argument counts). No file that nu accepts is rejected here.
+* **Token classification.** For every standard-library file,
+  `tools/scripts/flatcmp.nu` compares the output of nu's `ast --flatten` with
+  this crate's `flatten()` segment by segment. The only differences are the
+  documented signature-dependent ones (`get content.0` is a cell path only
+  because `get` declares that shape), attribute lines (which nu's flatten
+  treats as opaque) and `$.` (a cell-path literal here, a delimiter for nu).
+* **Speed.** `tools/nu-compat/bench-vs-nu-parser` times both parsers on the
+  same bytes, with `nu-parser` given the full command set as in the shell.
+  Two Nushell releases are shown, since 0.115.2 sped up `nu-parser`
+  considerably (`tools/nu-compat-prev` builds the same harness against the
+  crates.io release):
+
+  | Corpus | `nu-parser` 0.115.1 | `nu-parser` 0.115.2 | `nu-winnow-parser` | Ratio vs 0.115.1 | Ratio vs 0.115.2 |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | Standard library, 61 files, 250 kB | 31.6 ms | 25.2 ms | 7.4 ms | 4.2× | 3.4× |
+  | `nu_scripts`, 1538 files, 6.9 MB | 435 ms | 301 ms | 117 ms | 3.6× | 2.6× |
+  | `tests/corpus`, 14 files, 220 kB | 17.2 ms | 13.1 ms | 4.7 ms | 3.6× | 2.8× |
+
+  If the standard library is loaded so that `use std/...` resolves, `nu-parser`
+  also parses the imported modules and the gap grows to 15×; that number
+  measures the shell's whole parse step rather than the parser itself.
+
+### Plugging into Nushell
+
+`tools/nu-compat/src/bin/bridge.rs` is a working MVP: it parses with this
+crate, lowers the tree into `nu-protocol` structures inside a
+`StateWorkingSet` (resolving declarations, applying signatures, declaring
+variables and custom commands, tracking closure captures), compiles to IR with
+`nu-engine` and evaluates. `bridge --demo` runs 22 scripts through both front
+ends and checks that the results are identical. The lowering pass is about
+700 lines for the supported subset; the module system (`use`, `module`,
+`export`, `alias`, `const`) is the part still tied to `nu-parser`.
+
+### A formatter
+
+`examples/nufmt/` is a `nufmt`-style formatter over this AST (about 600
+lines): normalised spacing, indentation of blocks and multi-line collections,
+comments preserved, literals copied verbatim. `tests/nufmt.rs` checks on the
+whole corpus that formatting is idempotent, keeps every comment, and yields a
+structurally identical tree when re-parsed.
+
+```text
+cargo run --example nufmt -- --check tests/corpus
+echo 'ls|where size > 1kb' | cargo run --example nufmt
+```
 
 ## Performance notes
 
@@ -198,6 +251,10 @@ Deeply nested brackets recurse on the stack, one frame per nesting level, as
 * `tests/corpus.rs` — parses the real-world files in `tests/corpus/`
   (standard library modules, default config, completion modules, prompts) and
   optionally every `.nu` file under `NU_WINNOW_CORPUS`.
+* `tests/nufmt.rs` — idempotency and re-parse equivalence of the formatter
+  example over the corpus.
+* `tools/nu-compat` — benchmark against `nu-parser` and the engine bridge
+  (requires a local Nushell checkout; see its README).
 * Unit tests in each module (lexer, literals, flatten, spans, errors).
 
 Run everything with `cargo test`; run the benchmarks with `cargo bench`.

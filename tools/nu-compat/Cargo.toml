@@ -1,0 +1,29 @@
+[package]
+name = "nu-compat"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Benchmarks and an engine bridge comparing nu-winnow-parser with nu-parser"
+
+# These point at a local Nushell checkout so that the comparison uses exactly
+# the parser behind the `nu` binary used for verification. Replace the paths
+# with `version = "0.115"` to build against crates.io.
+[dependencies]
+nu-winnow-parser = { path = "../.." }
+nu-parser = { path = "/Users/fdncred/src/nushell/crates/nu-parser" }
+nu-protocol = { path = "/Users/fdncred/src/nushell/crates/nu-protocol" }
+nu-engine = { path = "/Users/fdncred/src/nushell/crates/nu-engine" }
+nu-cmd-lang = { path = "/Users/fdncred/src/nushell/crates/nu-cmd-lang" }
+nu-command = { path = "/Users/fdncred/src/nushell/crates/nu-command" }
+nu-std = { path = "/Users/fdncred/src/nushell/crates/nu-std" }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+
+[[bin]]
+name = "bench-vs-nu-parser"
+path = "src/bin/bench.rs"
+
+[[bin]]
+name = "bridge"
+path = "src/bin/bridge.rs"
+
+[workspace]
