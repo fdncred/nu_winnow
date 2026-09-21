@@ -16,7 +16,7 @@ repository root unless a `cd` is shown.
 
 ## The `parse` example
 
-```text
+```nushell
 parse [--check] [--summary] [--flat] [--json] [--quiet] [FILE|DIR ...]
 ```
 
@@ -41,7 +41,7 @@ one multi-word head. `tools/scripts/std_commands.txt` is such a file.
 
 Things to try:
 
-```text
+```nushell
 # The tree of a snippet, from stdin.
 echo 'ls | where size > 1kb | get name' | cargo run --release --example parse
 
@@ -73,7 +73,7 @@ CI job.
 
 ## The `nufmt` example
 
-```text
+```nushell
 nufmt [--write|-w] [--check] [FILE|DIR ...]
 ```
 
@@ -87,7 +87,7 @@ nufmt [--write|-w] [--check] [FILE|DIR ...]
 
 Things to try:
 
-```text
+```nushell
 # Format a snippet.
 echo 'ls|where size>1kb|get name' | cargo run --release --example nufmt
 
@@ -111,7 +111,7 @@ equal to the original's.
 
 ## Tests
 
-```text
+```nushell
 cargo test                              # everything, default features
 cargo test --all-features               # also the serde derives
 cargo test --test syntax                # one construct per test, with error cases
@@ -129,13 +129,13 @@ Two environment variables extend the corpus test:
 | `NU_WINNOW_CORPUS=/path` | Also parse every `.nu` file below this directory (for example a `nu_scripts` checkout) |
 | `NU_WINNOW_CORPUS_SKIP=a,b` | Skip files whose path contains one of these substrings |
 
-```text
+```nushell
 NU_WINNOW_CORPUS=~/src/nu_scripts cargo test --test corpus -- --nocapture
 ```
 
 The usual hygiene before a change is finished:
 
-```text
+```nushell
 cargo fmt
 cargo clippy --all-targets --all-features
 cargo test --all-features
@@ -145,7 +145,7 @@ cargo test --all-features
 
 ### Criterion (`benches/parse.rs`)
 
-```text
+```nushell
 cargo bench                             # all groups
 cargo bench -- parse/                   # whole-file parses: kitchen_sink, std_iter, std_assert, large_file
 cargo bench -- snippets/                # small programs: pipeline, math, record, closure, def
@@ -162,7 +162,7 @@ run stores the baseline.
 `parse --check` prints bytes, time and MB/s for a whole directory, which is
 the quickest way to compare two builds:
 
-```text
+```nushell
 cargo build --release --example parse
 cp target/release/examples/parse /tmp/parse-before
 # ... make a change, rebuild ...
@@ -176,7 +176,7 @@ This crate links the real Nushell crates by path from a checkout at
 `../../../nushell` (see its `Cargo.toml`); the first build takes several
 minutes.
 
-```text
+```nushell
 cd tools/nushell-harness
 cargo run --release --bin bench-vs-nu-parser -- [--iters N] [--std] FILE|DIR ...
 ```
@@ -190,7 +190,7 @@ cargo run --release --bin bench-vs-nu-parser -- [--iters N] [--std] FILE|DIR ...
 Without `--std` both parsers see the same bytes and nothing else, which is
 the fair comparison. Examples:
 
-```text
+```nushell
 cd tools/nushell-harness
 cargo run --release --bin bench-vs-nu-parser -- ~/src/nushell/crates/nu-std
 cargo run --release --bin bench-vs-nu-parser -- --iters 10 ../../tests/corpus
@@ -201,14 +201,14 @@ cargo run --release --bin bench-vs-nu-parser -- --std ~/src/nushell/crates/nu-st
 crates.io release of `nu-parser` (pinned in its `Cargo.toml`), so two Nushell
 versions can be put side by side:
 
-```text
+```nushell
 cd tools/nushell-harness-release
 cargo run --release -- ~/src/nushell/crates/nu-std
 ```
 
 ## The engine bridge (`tools/nushell-harness`, `bridge`)
 
-```text
+```nushell
 cd tools/nushell-harness
 cargo run --release --bin bridge -- [--demo] [--compare] [--file FILE] ['script']
 ```
@@ -222,7 +222,7 @@ cargo run --release --bin bridge -- [--demo] [--compare] [--file FILE] ['script'
 
 Things to try:
 
-```text
+```nushell
 cd tools/nushell-harness
 cargo run --release --bin bridge -- --demo
 cargo run --release --bin bridge -- '[3 1 2] | sort | each {|x| $x * 2 }'
@@ -243,7 +243,7 @@ parse`.
 
 ### `nucheck-compare.nu`
 
-```text
+```nushell
 nu tools/scripts/nucheck-compare.nu [--details] DIR...
 ```
 
@@ -254,7 +254,7 @@ that `nu-check` reports and a syntax-only parser cannot (a missing module, a
 type mismatch). With `--details` the script returns the whole table for
 further querying in Nushell.
 
-```text
+```nushell
 nu tools/scripts/nucheck-compare.nu ~/src/nushell/crates/nu-std
 nu tools/scripts/nucheck-compare.nu ~/src/nu_scripts ~/src/nushell/crates/nu-std
 nu -c 'nu tools/scripts/nucheck-compare.nu --details ~/src/nushell/crates/nu-std | where nu != ours'
@@ -262,7 +262,7 @@ nu -c 'nu tools/scripts/nucheck-compare.nu --details ~/src/nushell/crates/nu-std
 
 ### `flatcmp.nu`
 
-```text
+```nushell
 nu tools/scripts/flatcmp.nu [--commands FILE] FILE...
 ```
 
@@ -272,7 +272,7 @@ string, var, literal, op, flag, delim, sig), and prints each differing run
 with its line. Pass `--commands tools/scripts/std_commands.txt` so
 standard-library commands resolve as multi-word names, as they do inside nu.
 
-```text
+```nushell
 nu tools/scripts/flatcmp.nu --commands tools/scripts/std_commands.txt tests/corpus/std_log.nu
 nu -c 'nu tools/scripts/flatcmp.nu --commands tools/scripts/std_commands.txt ...(glob ~/src/nushell/crates/nu-std/**/*.nu)'
 ```
@@ -283,7 +283,7 @@ are opaque to nu's flatten, and `$.` is a cell-path literal here.
 
 ### `gen-std-commands.nu`
 
-```text
+```nushell
 nu tools/scripts/gen-std-commands.nu [STD_DIR] | save -f tools/scripts/std_commands.txt
 ```
 
@@ -297,7 +297,7 @@ that the other scripts and `NU_WINNOW_COMMANDS` use.
 | `builtin-commands` | on | Embed Nushell's built-in command names so multi-word heads such as `str trim` resolve. Without it `ParseConfig::new()` knows no commands and every head is one word. |
 | `serde` | off | Derive `Serialize` for the AST and diagnostics; enables `parse --json` |
 
-```text
+```nushell
 cargo build --no-default-features          # smallest library
 cargo build --features serde
 cargo doc --open                           # the API plus these chapters under `docs`
