@@ -13,6 +13,13 @@ cargo run --release --example nufmt -- --check dir/       # exit 1 if any file w
 echo 'ls|where size>1kb' | cargo run --release --example nufmt
 ```
 
+The last one prints `ls | where size > 1kb` and, on stderr, a note that
+`size>1kb` was written as a comparison: Nushell lexes on whitespace, so the
+unspaced word is one column name to it, which `where` can never find. This
+is the formatter's only change beyond layout; it is limited to bare words of
+`where` conditions and every occurrence is reported (see `format_with_notes`
+and `Formatter::compact_comparison` in `format.rs`).
+
 ## What "lossless" means here
 
 The parser produces an abstract syntax tree, not a concrete one: it does not

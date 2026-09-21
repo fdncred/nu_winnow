@@ -6,7 +6,7 @@
 #[allow(dead_code)]
 mod format;
 
-use format::{Options, format};
+use format::{Note, Options, format, format_with_notes};
 use nu_winnow_parser::{parse, pretty};
 
 /// The pretty-printed tree with all spans removed.
@@ -78,4 +78,41 @@ fn normalises_whitespace() {
     assert_eq!(fmt("ls # trailing\n\n\n\npwd"), "ls  # trailing\n\npwd\n");
     assert_eq!(fmt("each {|x|\n  $x\n}"), "each {|x|\n    $x\n}\n");
     assert_eq!(fmt("$\"a (1 + 1)\" | print"), "$\"a (1 + 1)\" | print\n");
+}
+
+/// A bare word in a `where` condition written without spaces around a
+/// comparison (`size>1kb`) is one column name to Nushell, which is never
+/// what was meant; the formatter writes the comparison and says so.
+#[test]
+fn splits_compact_row_conditions() {
+    let options = Options::default();
+    let fmt = |s: &str| format_with_notes(s, &options).unwrap();
+    let (out, notes) = fmt("ls|where size>1kb|get name");
+    assert_eq!(out, "ls | where size > 1kb | get name\n");
+    assert_eq!(notes, [Note { offset: 9, message: "`size>1kb` written as the comparison `size > 1kb`".into() }]);
+    // The rewrite is idempotent: the spaced form parses as a comparison.
+    assert_eq!(fmt(&out), (out.clone(), vec![]));
+
+    assert_eq!(fmt("ls | where size>=1kb and name=~Cargo").0, "ls | where size >= 1kb and name =~ Cargo\n");
+    assert_eq!(fmt("ls | where not type==dir").0, "ls | where not type == dir\n");
+    assert_eq!(fmt("ls | where modified<2024-01-01").0, "ls | where modified < 2024-01-01\n");
+    assert_eq!(fmt("ls | where size > 1kb and name!=Cargo").0, "ls | where size > 1kb and name != Cargo\n");
+    assert_eq!(fmt("ls | where size>1kb | where name=~Cargo").1.len(), 2);
+
+    // Not a comparison, or not a row condition: left alone, no note.
+    for src in [
+        "ls | where \"size>1kb\"",
+        "ls | where size>>1kb",
+        "ls | where size==",
+        "ls | where a=1",
+        "ls | where name",
+        "ls | where name =~ Cargo",
+        "ls | where name == a>b",
+        "echo size>1kb",
+        "ls | where {|row| $row.size > 1kb }",
+    ] {
+        let (out, notes) = fmt(src);
+        assert_eq!(out.trim_end(), src, "{src}");
+        assert!(notes.is_empty(), "{src}");
+    }
 }

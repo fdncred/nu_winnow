@@ -88,7 +88,8 @@ nufmt [--write|-w] [--check] [FILE|DIR ...]
 Things to try:
 
 ```nushell
-# Format a snippet.
+# Format a snippet. Prints `ls | where size > 1kb | get name` and, on stderr,
+# a note that `size>1kb` was written as a comparison (see below).
 echo 'ls|where size>1kb|get name' | cargo run --release --example nufmt
 
 # See what the formatter would do to a file, without touching it.
@@ -108,6 +109,16 @@ blocks and multi-line collections and re-emits comments by position. Its
 reconstructs a file losslessly. Its tests (`tests/nufmt.rs`) require
 formatting to be idempotent, to keep every comment, and to produce a tree
 equal to the original's.
+
+One rewrite goes beyond whitespace. Nushell lexes on whitespace, so in
+`where size>1kb` the word `size>1kb` is a single column name, and `where`
+fails at run time with "did you mean 'size'?". That is never what was meant,
+so inside a `where` condition the formatter writes such a word as the
+comparison `size > 1kb` (also for a bare word that is an operand of
+`and`/`or`/`xor`, which Nushell reads as a string and always rejects) and
+reports each rewrite on stderr as `file:line:col: note: ...`. Quoted words,
+words that are not `column<op>value` in shape, and words outside a `where`
+condition are left alone.
 
 ## Tests
 

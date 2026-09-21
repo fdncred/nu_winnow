@@ -13,7 +13,18 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use format::{Options, format};
+use nu_winnow_parser::LineIndex;
+
+use format::{Note, Options, format_with_notes};
+
+/// Print the formatter's notes (rewrites beyond whitespace) to stderr.
+fn report(notes: &[Note], src: &str, name: &str) {
+    let index = LineIndex::new(src);
+    for note in notes {
+        let at = index.line_col(note.offset, src);
+        eprintln!("{name}:{}:{}: note: {}", at.line, at.column, note.message);
+    }
+}
 
 fn collect(path: &Path, out: &mut Vec<PathBuf>) {
     if path.is_dir() {
@@ -45,8 +56,9 @@ fn main() -> ExitCode {
             eprintln!("error: stdin is not valid UTF-8");
             return ExitCode::FAILURE;
         }
-        return match format(&src, &options) {
-            Ok(out) => {
+        return match format_with_notes(&src, &options) {
+            Ok((out, notes)) => {
+                report(&notes, &src, "<stdin>");
                 print!("{out}");
                 ExitCode::SUCCESS
             }
@@ -65,8 +77,9 @@ fn main() -> ExitCode {
     let mut changed = 0;
     for file in &files {
         let Ok(src) = std::fs::read_to_string(file) else { continue };
-        match format(&src, &options) {
-            Ok(out) => {
+        match format_with_notes(&src, &options) {
+            Ok((out, notes)) => {
+                report(&notes, &src, &file.display().to_string());
                 if check {
                     if out != src {
                         println!("would reformat {}", file.display());

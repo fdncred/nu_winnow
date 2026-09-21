@@ -33,11 +33,35 @@ impl Default for Options {
     }
 }
 
+/// A change the formatter made beyond whitespace, reported to the user.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Note {
+    /// Byte offset in the source of the text the note is about.
+    pub offset: usize,
+    /// What was done.
+    pub message: String,
+}
+
 /// Format a Nushell source text.
+#[allow(dead_code)] // the binary reports notes; `tests/nufmt.rs` uses this one
 pub fn format(src: &str, options: &Options) -> Result<String, ParseError> {
+    format_with_notes(src, options).map(|(out, _)| out)
+}
+
+/// Format a Nushell source text and also return the [`Note`]s about
+/// rewrites that go beyond whitespace (see [`Formatter::compact_comparison`]).
+pub fn format_with_notes(src: &str, options: &Options) -> Result<(String, Vec<Note>), ParseError> {
     let ast = parse_with(src, &options.config)?;
-    let mut f =
-        Formatter { src, out: String::new(), indent: 0, options, comments: ast.comments.clone(), next_comment: 0 };
+    let mut f = Formatter {
+        src,
+        out: String::new(),
+        indent: 0,
+        options,
+        comments: ast.comments.clone(),
+        next_comment: 0,
+        row_condition: false,
+        notes: Vec::new(),
+    };
     f.block_body(&ast.block, 0, src.len());
     f.flush_comments(src.len());
     let mut out = std::mem::take(&mut f.out);
@@ -47,7 +71,29 @@ pub fn format(src: &str, options: &Options) -> Result<String, ParseError> {
     if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
     }
-    Ok(out)
+    Ok((out, f.notes))
+}
+
+/// The comparison operators a bare word in a row condition may have been
+/// written around without spaces, longest first so `>=` wins over `>`.
+const COMPARISONS: [&str; 8] = ["==", "!=", "<=", ">=", "=~", "!~", "<", ">"];
+
+/// Split `size>1kb` into `("size", ">", "1kb")`.
+///
+/// The left side must look like a column name (letters, digits, `_`, `-`,
+/// `.`, `?`) and the right side must be non-empty and not start another
+/// operator, so `a>>b` and `a==` are left alone.
+fn split_compact_comparison(word: &str) -> Option<(&str, &str, &str)> {
+    let at = word.find(['<', '>', '=', '!'])?;
+    let (lhs, rest) = word.split_at(at);
+    let op = COMPARISONS.iter().find(|op| rest.starts_with(*op))?;
+    let rhs = &rest[op.len()..];
+    let column_char = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '?');
+    let ok = !lhs.is_empty()
+        && lhs.chars().all(column_char)
+        && !rhs.is_empty()
+        && !rhs.starts_with(['<', '>', '=', '!', '~']);
+    ok.then_some((lhs, op, rhs))
 }
 
 struct Formatter<'a> {
@@ -57,6 +103,9 @@ struct Formatter<'a> {
     options: &'a Options,
     comments: Vec<Comment>,
     next_comment: usize,
+    /// `true` while formatting the condition of a `where`.
+    row_condition: bool,
+    notes: Vec<Note>,
 }
 
 impl<'a> Formatter<'a> {
@@ -611,6 +660,9 @@ impl<'a> Formatter<'a> {
             | ExprKind::Range(_)
             | ExprKind::Garbage => self.word(self.text(span)),
             ExprKind::FullCellPath(p) => {
+                if p.implicit_head && p.members.len() == 1 && self.compact_comparison(span) {
+                    return;
+                }
                 self.expr(&p.head);
                 let tail = Span::new(p.head.span.end, span.end);
                 self.glue(self.text(tail));
@@ -622,9 +674,10 @@ impl<'a> Formatter<'a> {
             ExprKind::Block(b) => self.braced_block(b, span),
             ExprKind::Subexpression(b) => self.subexpression(b, span),
             ExprKind::BinaryOp(b) => {
-                self.expr(&b.lhs);
+                let boolean = matches!(b.op.item, Operator::Boolean(_));
+                self.row_condition_operand(&b.lhs, boolean);
                 self.word(self.text(b.op.span));
-                self.expr(&b.rhs);
+                self.row_condition_operand(&b.rhs, boolean);
             }
             ExprKind::UnaryNot(n) => {
                 self.word("not");
@@ -770,10 +823,45 @@ impl<'a> Formatter<'a> {
             }
             ExprKind::Where(w) => {
                 self.word("where");
+                let saved = std::mem::replace(&mut self.row_condition, true);
                 self.expr(&w.condition);
+                self.row_condition = saved;
             }
             _ => self.word(self.text(span)),
         }
+    }
+
+    /// An operand of a binary operator. In a row condition, a bare word that
+    /// is the operand of `and`/`or`/`xor` (`where a > 1 and size>1kb`) is a
+    /// string in Nushell, which the boolean operator always rejects, so it
+    /// gets the same treatment as a bare column name.
+    fn row_condition_operand(&mut self, e: &Expr<'a>, boolean: bool) {
+        let bare_string = matches!(&e.kind, ExprKind::String(s) if s.quote == Quote::Bare);
+        if self.row_condition && boolean && bare_string && self.compact_comparison(e.span) {
+            return;
+        }
+        self.expr(e);
+    }
+
+    /// Write a bare word of a row condition that was written without spaces
+    /// around a comparison (`size>1kb`) as the comparison it was meant to be
+    /// (`size > 1kb`), and record a [`Note`]. Returns `false`, writing nothing,
+    /// when the word is not of that shape.
+    ///
+    /// Nushell lexes `size>1kb` as one word and `where` then looks up a column
+    /// literally named `size>1kb`; that is never what was meant, and nu itself
+    /// answers "did you mean 'size'?".
+    fn compact_comparison(&mut self, span: Span) -> bool {
+        let word = self.text(span);
+        let Some((lhs, op, rhs)) = split_compact_comparison(word) else { return false };
+        self.word(lhs);
+        self.word(op);
+        self.word(rhs);
+        self.notes.push(Note {
+            offset: span.start,
+            message: format!("`{word}` written as the comparison `{lhs} {op} {rhs}`"),
+        });
+        true
     }
 
     /// The right-hand side of `let`/assignment: pipelines written inline.
