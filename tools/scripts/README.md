@@ -11,11 +11,17 @@ All scripts run with `nu` 0.115.2 and need the example binary built with
   class alphabet (call, string, var, literal, op, flag, delim, sig). Pass
   `--commands std_commands.txt` so standard-library commands such as
   `assert equal` resolve as multi-word names, as they do inside nu.
+* `nufmt-fixtures.nu [NUFMT_DIR]` — runs the `nufmt` example over the
+  ground-truth fixtures of a nushell/nufmt checkout (default `~/src/nufmt`)
+  and reports which `tests/fixtures/expected` files it reproduces; `--diff
+  NAME` prints the diff for one fixture. Needs
+  `cargo build --release --example nufmt`.
 * `gen-std-commands.nu [STD_DIR]` — regenerates `std_commands.txt`, the list
   of standard-library exports both bare and module-prefixed.
 
 ```text
 nu tools/scripts/nucheck-compare.nu ~/src/nu_scripts ~/src/nushell/crates/nu-std
 nu tools/scripts/flatcmp.nu --commands tools/scripts/std_commands.txt ...(glob ~/src/nushell/crates/nu-std/**/*.nu)
+nu tools/scripts/nufmt-fixtures.nu --diff closure
 nu tools/scripts/gen-std-commands.nu ~/src/nushell/crates/nu-std | save -f tools/scripts/std_commands.txt
 ```
