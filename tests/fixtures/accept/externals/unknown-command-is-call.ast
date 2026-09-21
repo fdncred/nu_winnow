@@ -1,0 +1,5 @@
+Block 0..29
+  Pipeline 0..28
+    Call `foo-external-call` 0..28
+      Flag --flag 18..24
+      String Bare "arg" 25..28

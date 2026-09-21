@@ -3,6 +3,10 @@
 All scripts run with `nu` 0.115.2 and need the example binary built with
 `cargo build --release --example parse`.
 
+* `fixtures-compare.nu` — runs every `tests/fixtures` snippet through this
+  parser, `nu-check` and (when `tools/nushell-harness` is built) the local
+  checkout's `nu-parser`, and prints the disagreements with nu-parser's
+  message. `--details` returns the full table.
 * `nucheck-compare.nu DIR...` — for every `.nu` file, records whether
   `nu-check` and this parser accept it, and prints the disagreements. With
   `--details` it returns the full table for further querying.
@@ -21,6 +25,7 @@ All scripts run with `nu` 0.115.2 and need the example binary built with
   of standard-library exports both bare and module-prefixed.
 
 ```text
+nu tools/scripts/fixtures-compare.nu
 nu tools/scripts/nucheck-compare.nu ~/src/nu_scripts ~/src/nushell/crates/nu-std
 nu tools/scripts/flatcmp.nu --commands tools/scripts/std_commands.txt ...(glob ~/src/nushell/crates/nu-std/**/*.nu)
 nu tools/scripts/nufmt-fixtures.nu --diff closure

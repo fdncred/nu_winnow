@@ -1,0 +1,6 @@
+error: expected signature like `[param: type]`
+  --> reject/def/def-no-space-bracket.nu:1:11
+  |
+1 | def cmd[] {}
+  |           ^^
+  = while parsing def

@@ -1,0 +1,6 @@
+error: attributes cannot contain pipelines or redirections
+  --> reject/calls/attribute-with-pipe.nu:1:12
+  |
+1 | @example x | y
+  |            ^
+  = while parsing attribute

@@ -1,0 +1,5 @@
+error: expected record key
+  --> reject/records/semicolon-separator.nu:1:21
+  |
+1 | { show_banner: false; table_mode: rounded }
+  |                     ^

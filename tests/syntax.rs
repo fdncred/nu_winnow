@@ -592,7 +592,10 @@ fn records() {
     assert_eq!(ast.comments.len(), 1);
     let ast = ok("{}");
     assert!(kind!(expr(&ast), ExprKind::Record(r) => r).is_empty());
-    let ast = ok("{a: http://x.y}");
+    // Like nu, a bare word containing `:` is refused as a record key or value.
+    assert!(parse("{a: http://x.y}").is_err());
+    assert!(parse("{ :: x }").is_err());
+    let ast = ok("{a: \"http://x.y\"}");
     kind!(expr(&ast), ExprKind::Record(_));
     let ast = ok("{a 1}");
     kind!(expr(&ast), ExprKind::Closure(_));
@@ -985,7 +988,7 @@ fn use_forms() {
 
 #[test]
 fn attributes() {
-    let src = "@example \"add\" { 1 + 1 } --result 2\n@search-terms math plus\n# doc\n@category math\nexport def add [] { }\n";
+    let src = "# doc\n@example \"add\" { 1 + 1 } --result 2 # why\n@search-terms math plus\n@category math\nexport def add [] { }\n";
     let ast = ok(src);
     let a = kind!(expr(&ast), ExprKind::AttributeBlock(a) => a);
     assert_eq!(a.attributes.len(), 3);
@@ -994,11 +997,14 @@ fn attributes() {
     assert_eq!(a.attributes[1].name.item, "search-terms");
     assert_eq!(text(&ast, a.attributes[1].name.span), "search-terms");
     kind!(a.item, ExprKind::Export(_));
-    assert_eq!(ast.comments.len(), 1);
+    assert_eq!(ast.comments.len(), 2);
     let ast = ok("@deprecated\ndef old [] { }");
     kind!(expr(&ast), ExprKind::AttributeBlock(_));
     assert!(parse("@example x\nls").is_err());
     assert!(parse("@example x\n").is_err());
+    // Like nu, nothing may come between the attributes and the definition.
+    assert!(parse("@example x\n\ndef f [] { }").is_err());
+    assert!(parse("@example x\n# doc\ndef f [] { }").is_err());
 }
 
 // --- control flow --------------------------------------------------------------------

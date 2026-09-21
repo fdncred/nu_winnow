@@ -354,10 +354,12 @@ fn type_after_name<'a>(
     typed: bool,
     after_name: Span,
 ) -> PResult<Option<crate::ast::TypeAnnotation<'a>>> {
-    let (typed, items) = match items.split_first() {
-        Some((first, rest)) if st.tok(first) == ":" => (true, rest),
-        _ => (typed, items),
-    };
+    // `let a : int`: like Nushell, the colon must be attached to the name.
+    if let Some(first) = items.first()
+        && st.tok(first) == ":"
+    {
+        return Err(cut(Diagnostic::new(ErrorKind::ExtraTokens, first.span)));
+    }
     match (typed, items.first(), items.last()) {
         (true, Some(first), Some(last)) => Ok(Some(signature::parse_type(st, first.span.merge(last.span))?)),
         (true, ..) => Err(cut(Diagnostic::expected("type after `:`", after_name))),
@@ -400,7 +402,12 @@ fn alias_stmt<'a>(st: St<'_, 'a>, mut c: Cursor<'_>) -> PResult<Expr<'a>> {
     if words.is_empty() {
         return Err(cut(Diagnostic::expected("command after `=`", eq_tok.span.past())));
     }
-    let value = expr::parse_expression(st, Cursor::new(&words, c.end_span().start))?;
+    // `alias i = if`: a keyword is aliased as a plain call, not parsed as a statement.
+    let cursor = Cursor::new(&words, c.end_span().start);
+    let value = match is_parser_keyword(st.tok(&words[0])) {
+        true => expr::parse_call(st, cursor)?,
+        false => expr::parse_expression(st, cursor)?,
+    };
     let span = kw.span.merge(value.span);
     Ok(Expr::new(ExprKind::Alias(Alias { name, eq: eq_tok.span, value: Box::new(value) }), span))
 }

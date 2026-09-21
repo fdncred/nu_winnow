@@ -161,12 +161,18 @@ on stderr as `file:line:col: note: ...`:
 cargo test                              # everything, default features
 cargo test --all-features               # also the serde derives
 cargo test --test syntax                # one construct per test, with error cases
+cargo test --test fixtures              # every snippet in tests/fixtures, against its golden tree or error
+cargo test --test language              # value/shape tables mirroring Nushell's own parser tests
 cargo test --test corpus                # every file in tests/corpus must parse cleanly
 cargo test --test nufmt                 # formatter idempotency and structure preservation
 cargo test --doc                        # the `rust` blocks in src/docs and the README
 cargo test --lib lexer                  # unit tests of one module
 cargo test --test syntax -- if_forms    # one test by name
 ```
+
+`UPDATE_FIXTURES=1 cargo test --test fixtures` rewrites the golden `.ast`
+and `.err` files next to the fixtures after an intentional parser change;
+review the diff before committing. See `tests/fixtures/README.md`.
 
 Two environment variables extend the corpus test:
 
@@ -243,6 +249,18 @@ cargo run --release --bin bench-vs-nu-parser -- --iters 10 ../../tests/corpus
 cargo run --release --bin bench-vs-nu-parser -- --std ~/src/nushell/crates/nu-std
 ```
 
+The same package has `nu-parser-check`, a `nu-check` equivalent built on the
+checkout's `nu-parser` with every built-in command, `$nu` and the standard
+library registered, used by `fixtures-compare.nu`:
+
+```nushell
+cd tools/nushell-harness
+cargo run --release --bin nu-parser-check -- [--no-std] [--quiet] FILE...
+```
+
+It prints `ok FILE` or `error FILE: <first parse error>` per file and exits
+non-zero if any file failed.
+
 `tools/nushell-harness-release` is the same benchmark compiled against the
 crates.io release of `nu-parser` (pinned in its `Cargo.toml`), so two Nushell
 versions can be put side by side:
@@ -286,6 +304,27 @@ it does not support the module system (`use`, `module`, `export`) yet. See
 The scripts are written in Nushell (0.115.2) and use the release build of the
 `parse` example, so build it first with `cargo build --release --example
 parse`.
+
+### `fixtures-compare.nu`
+
+```nushell
+nu tools/scripts/fixtures-compare.nu [--details] [--parse BIN] [--check BIN] [--fixtures DIR]
+```
+
+Runs every file in `tests/fixtures/` through three front ends and reports
+the disagreements: `ours` (`parse --check`), `nu` (`nu-check` in the `nu`
+on `PATH`) and `main` (`nu-parser` from the local Nushell checkout via
+`tools/nushell-harness`'s `nu-parser-check`, with its first error message;
+`null` when that binary is not built). The expected verdict is the
+fixture's directory, `accept` or `reject`. `--details` returns the whole
+table.
+
+```nushell
+cargo build --release --example parse
+cd tools/nushell-harness; cargo build --release --bin nu-parser-check; cd ../..
+nu tools/scripts/fixtures-compare.nu
+nu -c 'use tools/scripts/fixtures-compare.nu; fixtures-compare --details | where ours != nu'
+```
 
 ### `nucheck-compare.nu`
 

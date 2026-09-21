@@ -41,7 +41,7 @@ The `ExprKind` variants, grouped as in the source:
 | Variables and paths | `Var`, `CellPath` (`$.a`), `FullCellPath` (head + members, `implicit_head` for `$it`) |
 | Collections | `List(Vec<ListItem>)`, `Table`, `Record(Vec<RecordItem>)`, `Closure`, `Block`, `Subexpression` |
 | Operators | `BinaryOp`, `UnaryNot`, `Assignment` (rhs is a `Block`) |
-| Calls | `Call { head, args }`, `ExternalCall`, `EnvShorthand`, `AttributeBlock` |
+| Calls | `Call { head, args, sigil }`, `DynamicCall` (`%$cmd`), `ExternalCall`, `EnvShorthand`, `AttributeBlock` |
 | Declarations | `Let`, `Mut`, `Const` (all `Binding`), `Def`, `Extern`, `Alias`, `Use`, `Module`, `Export`, `ExportEnv` |
 | Control flow | `If`, `Match`, `For`, `While`, `Loop`, `Break`, `Continue`, `Return`, `Try`, `Where` |
 | Recovery | `Garbage` |

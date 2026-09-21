@@ -29,6 +29,37 @@ span lies inside its parent and on a UTF-8 boundary. Add a test here for any
 grammar change; include the nu behaviour you verified (`nu -n -c '...'`) in
 a comment when it is surprising.
 
+## `tests/fixtures.rs`: one file per construct, with golden trees
+
+`tests/fixtures/accept/<area>/*.nu` and `tests/fixtures/reject/<area>/*.nu`
+hold one snippet each: every literal spelling, every statement form, every
+layout (multi-line, leading pipes, comments in every position, CRLF, tabs,
+Unicode) and every error the parser reports, about 850 files organised by
+grammar area. Many are lifted from Nushell's own `crates/nu-parser/tests`
+and `tests/repl` suites. `rstest`'s `#[files]` makes each file a test:
+
+* an `accept` fixture must parse with no diagnostics, with nested spans on
+  char boundaries, a `flatten()` that covers every significant byte without
+  overlap, and a tree equal to the golden `<name>.ast` (`pretty::dump`);
+* a `reject` fixture must fail, and the rendered diagnostics must equal the
+  golden `<name>.err`, which pins *which* error fires.
+
+Golden files are regenerated with `UPDATE_FIXTURES=1 cargo test --test
+fixtures`; review the diff. `tests/fixtures/README.md` has the rules for
+adding one.
+
+## `tests/language.rs`: values and token streams, from Nushell's tests
+
+`rstest` case tables mirroring `test_lex.rs`, `test_parser.rs`,
+`test_parser_unicode_escapes.rs` and the repl language tests: integer and
+float values, filesize/duration decoding, binary bytes, string escapes and
+their error messages, interpolation parts, external-call heads and argument
+kinds, `%` sigil calls, cell-path members, every range form, operator
+precedence (as fully parenthesised text), redirections inside `let`, comment
+counts around pipes, lexer token spans and delimiter errors. Where nu's tree
+differs by design (an unknown head is a `Call`, a backtick word is unquoted
+in an external call) the table says so.
+
 ## `tests/corpus.rs`: real files
 
 `tests/corpus/` holds standard-library modules, the default config files,
@@ -47,6 +78,13 @@ parses but whose spans are wrong will format into something different.
 
 ## Comparing with Nushell itself (`tools/scripts/`, Nushell scripts)
 
+* `fixtures-compare.nu` runs every fixture through this parser, `nu-check`
+  of the `nu` on `PATH` and, when built, `nu-parser` from the local Nushell
+  checkout (`tools/nushell-harness`, `nu-parser-check`), and prints the rows
+  where they disagree with the expected verdict or each other, with
+  nu-parser's message. Run it after any parser change and whenever the
+  Nushell checkout moves; a row where `ours` and `nu` differ is a parser
+  difference, the rest are semantic checks or version differences.
 * `nucheck-compare.nu DIR...` runs `nu-check` and this parser on every file
   and reports disagreements. A file nu accepts and this parser rejects is a
   bug; the other direction is usually a semantic error (missing module, type

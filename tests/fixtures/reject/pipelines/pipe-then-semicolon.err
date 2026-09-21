@@ -1,0 +1,6 @@
+error: unexpected end of input, expected command after `|`
+  --> reject/pipelines/pipe-then-semicolon.nu:1:13
+  |
+1 | let x = 300 | ;
+  |             ^
+  = while parsing pipeline

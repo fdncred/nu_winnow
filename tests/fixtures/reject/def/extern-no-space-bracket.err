@@ -1,0 +1,6 @@
+error: expected signature
+  --> reject/def/extern-no-space-bracket.nu:1:13
+  |
+1 | extern cmd[]
+  |             ^
+  = while parsing extern

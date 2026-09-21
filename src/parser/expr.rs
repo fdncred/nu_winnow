@@ -6,8 +6,8 @@
 use std::borrow::Cow;
 
 use crate::ast::{
-    Arg, Assignment, BinaryOp, Call, CallHead, EnvAssignment, EnvShorthand, Expr, ExprKind, ExternalArg, ExternalCall,
-    Flag, InterpPart, Interpolation, Operator, Quote, StringLit, UnaryNot,
+    Arg, Assignment, BinaryOp, Call, CallHead, DynamicCall, EnvAssignment, EnvShorthand, Expr, ExprKind, ExternalArg,
+    ExternalCall, Flag, InterpPart, Interpolation, Operator, Quote, StringLit, UnaryNot,
 };
 use crate::error::{Diagnostic, ErrorKind};
 use crate::input::{PResult, cut};
@@ -90,9 +90,10 @@ fn assignment<'a>(st: St<'_, 'a>, c: Cursor<'_>) -> PResult<Expr<'a>> {
         return Err(cut(Diagnostic::expected("left hand side of assignment", op_tok.span)));
     }
     let lhs = parse_expression(st, c.slice(0..op_idx))?;
+    // nu accepts a subexpression head too (`(1) = 2`) and fails at run time.
     match &lhs.kind {
-        ExprKind::Var(_) => {}
-        ExprKind::FullCellPath(p) if matches!(p.head.kind, ExprKind::Var(_)) => {}
+        ExprKind::Var(_) | ExprKind::Subexpression(_) => {}
+        ExprKind::FullCellPath(p) if matches!(p.head.kind, ExprKind::Var(_) | ExprKind::Subexpression(_)) => {}
         _ => {
             return Err(cut(Diagnostic::message("assignment requires a variable", lhs.span)
                 .with_help("only variables (`$x`) and their cell paths (`$x.a`, `$env.FOO`) can be assigned to")));
@@ -233,13 +234,61 @@ const MAX_COMMAND_WORDS: usize = 5;
 /// Parse a call: a (possibly multi-word) command name followed by arguments.
 pub fn parse_call<'a>(st: St<'_, 'a>, mut c: Cursor<'_>) -> PResult<Expr<'a>> {
     let first = c.expect_item("command")?;
-    if st.tok(&first).starts_with('^') {
-        return external_call(st, first, c);
+    match st.tok(&first).as_bytes()[0] {
+        b'^' => return external_call(st, first, c),
+        b'%' => return percent_call(st, first, c),
+        _ => {}
     }
     let head = resolve_head(st, first, &mut c, "");
     let args = parse_args(st, c)?;
     let span = first.span.merge(args.last().map_or(head.span, Arg::span));
-    Ok(Expr::new(ExprKind::Call(Call { head, args }), span))
+    Ok(Expr::new(ExprKind::Call(Call { head, args, sigil: None }), span))
+}
+
+const PERCENT_HELP: &str =
+    "write the built-in command's name bare (`%ls`), or `%$var` / `%(expr)` to name it at run time";
+
+/// `%cmd args`, `% cmd args`, `%$var args` and `%(expr) args`: a call that
+/// must resolve to a built-in command, never a custom command or alias.
+/// `first` is the item starting with `%`, already consumed.
+fn percent_call<'a>(st: St<'_, 'a>, first: Token, mut c: Cursor<'_>) -> PResult<Expr<'a>> {
+    let sigil = Span::new(first.span.start, first.span.start + 1);
+    // The head is the rest of the item, or the next item after a bare `%`.
+    let head_tok = match first.span.len() {
+        1 => match c.next() {
+            Some(tok) if tok.kind == TokenKind::Item => *tok,
+            _ => {
+                return Err(cut(
+                    Diagnostic::message("percent sigil requires a built-in command", sigil).with_help(PERCENT_HELP)
+                ));
+            }
+        },
+        _ => Token { kind: TokenKind::Item, span: Span::new(sigil.end, first.span.end) },
+    };
+    let head_text = st.tok(&head_tok);
+    match head_text.as_bytes()[0] {
+        b'$' | b'(' => {
+            let head = value::value(st, head_tok.span, Hint::Any)?;
+            let args = parse_args(st, c)?;
+            let span = sigil.merge(args.last().map_or(head.span, Arg::span));
+            Ok(Expr::new(ExprKind::DynamicCall(DynamicCall { sigil, head: Box::new(head), args }), span))
+        }
+        b'"' | b'\'' | b'`' | b'[' | b'{' | b'^' | b'%' => {
+            Err(cut(
+                Diagnostic::message("percent sigil requires a built-in command", head_tok.span).with_help(PERCENT_HELP)
+            ))
+        }
+        _ => {
+            let head = resolve_head(st, head_tok, &mut c, "");
+            if st.is_builtin_command(&head.name) == Some(false) {
+                return Err(cut(Diagnostic::message("percent sigil requires a built-in command", head.span)
+                    .with_help(format!("`{}` is not a built-in command; {PERCENT_HELP}", head.name))));
+            }
+            let args = parse_args(st, c)?;
+            let span = sigil.merge(args.last().map_or(head.span, Arg::span));
+            Ok(Expr::new(ExprKind::Call(Call { head, args, sigil: Some(sigil) }), span))
+        }
+    }
 }
 
 /// Resolve the longest known command name starting at `first` (already

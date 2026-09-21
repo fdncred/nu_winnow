@@ -90,25 +90,48 @@ pub enum FlatShape {
 
 /// Flatten an AST into source-ordered `(span, shape)` pairs.
 pub fn flatten(ast: &Ast<'_>) -> Vec<(Span, FlatShape)> {
-    let mut f = Flattener { out: Vec::new() };
+    let mut f = Flattener { src: ast.source, out: Vec::new() };
     f.visit_block(&ast.block);
-    for c in &ast.comments {
-        f.out.push((c.span, FlatShape::Comment));
+    // Comments win over the shapes of the constructs they sit in (the gaps of
+    // a list or record), so cut them out of every other shape.
+    let comments: Vec<Span> = ast.comments.iter().map(|c| c.span).collect();
+    let mut out = Vec::with_capacity(f.out.len() + comments.len());
+    for (span, shape) in f.out {
+        let mut start = span.start;
+        for c in comments.iter().filter(|c| c.start < span.end && span.start < c.end) {
+            if c.start > start {
+                out.push((Span::new(start, c.start), shape));
+            }
+            start = start.max(c.end);
+        }
+        if start < span.end {
+            out.push((Span::new(start, span.end), shape));
+        }
     }
-    f.out.sort_by_key(|(s, _)| (s.start, s.end));
-    f.out.dedup();
-    f.out
+    out.extend(comments.into_iter().map(|c| (c, FlatShape::Comment)));
+    out.sort_by_key(|(s, _)| (s.start, s.end));
+    out.dedup();
+    out
 }
 
-struct Flattener {
+struct Flattener<'s> {
+    src: &'s str,
     out: Vec<(Span, FlatShape)>,
 }
 
-impl Flattener {
+impl Flattener<'_> {
     fn push(&mut self, span: Span, shape: FlatShape) {
         if !span.is_empty() {
             self.out.push((span, shape));
         }
+    }
+
+    /// The declaration of a variable: the name plus a leading `$` and a
+    /// trailing `:` when they are written (`let $x: int`, `for x: int in`).
+    fn var_decl(&mut self, name: Span) {
+        let start = if self.src[..name.start].ends_with('$') { name.start - 1 } else { name.start };
+        let end = if self.src[name.end..].starts_with(':') { name.end + 1 } else { name.end };
+        self.push(Span::new(start, end), FlatShape::VarDecl);
     }
 
     /// Emit `shape` for the parts of `outer` not covered by `inner` spans
@@ -159,9 +182,12 @@ impl Flattener {
     }
 }
 
-impl<'a> Visitor<'a> for Flattener {
+impl<'a> Visitor<'a> for Flattener<'_> {
     fn visit_element(&mut self, element: &PipelineElement<'a>) {
-        if let Some(p) = element.pipe {
+        // After `e>|` the "pipe" is the redirection operator, already emitted.
+        if let Some(p) = element.pipe
+            && &self.src[p.range()] == "|"
+        {
             self.push(p, FlatShape::Pipe);
         }
         walk_element(self, element);
@@ -350,8 +376,22 @@ impl<'a> Visitor<'a> for Flattener {
                 self.visit_block(&a.rhs);
             }
             ExprKind::Call(c) => {
-                self.push(c.head.span, FlatShape::InternalCall);
+                match c.sigil {
+                    Some(sigil) if sigil.end == c.head.span.start => {
+                        self.push(sigil.merge(c.head.span), FlatShape::InternalCall);
+                    }
+                    Some(sigil) => {
+                        self.push(sigil, FlatShape::InternalCall);
+                        self.push(c.head.span, FlatShape::InternalCall);
+                    }
+                    None => self.push(c.head.span, FlatShape::InternalCall),
+                }
                 self.args(&c.args);
+            }
+            ExprKind::DynamicCall(d) => {
+                self.push(d.sigil, FlatShape::InternalCall);
+                self.visit_expr(&d.head);
+                self.args(&d.args);
             }
             ExprKind::ExternalCall(c) => {
                 self.push(c.caret, FlatShape::External);
@@ -387,7 +427,7 @@ impl<'a> Visitor<'a> for Flattener {
                 self.visit_expr(&a.item);
             }
             ExprKind::Let(b) | ExprKind::Mut(b) | ExprKind::Const(b) => {
-                self.push(b.name.span, FlatShape::VarDecl);
+                self.var_decl(b.name.span);
                 if let Some(ty) = &b.ty {
                     self.push(ty.span, FlatShape::Type);
                 }
@@ -468,7 +508,7 @@ impl<'a> Visitor<'a> for Flattener {
                 self.gaps(m.block_span, inner.into_iter(), FlatShape::Block);
             }
             ExprKind::For(f) => {
-                self.push(f.var.span, FlatShape::VarDecl);
+                self.var_decl(f.var.span);
                 if let Some(ty) = &f.ty {
                     self.push(ty.span, FlatShape::Type);
                 }

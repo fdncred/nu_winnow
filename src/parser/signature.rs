@@ -127,8 +127,10 @@ fn parse_params<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Vec<Param<'a>>>
                 }
                 Mode::Type => {
                     let (ty, completer) = parse_type_with_completer(st, tok.span)?;
+                    // `[: int]`: nu silently drops a type with no parameter before it.
                     let Some(p) = params.last_mut() else {
-                        return Err(cut(Diagnostic::expected("parameter before type", tok.span)));
+                        mode = Mode::AfterType;
+                        continue;
                     };
                     p.ty = Some(ty);
                     p.completer = completer;
@@ -137,8 +139,10 @@ fn parse_params<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Vec<Param<'a>>>
                 }
                 Mode::Default => {
                     let default = value::value(st, tok.span, Hint::Any)?;
+                    // `[= 1]`: nu silently drops a default with no parameter before it.
                     let Some(p) = params.last_mut() else {
-                        return Err(cut(Diagnostic::expected("parameter before default value", tok.span)));
+                        mode = Mode::Arg;
+                        continue;
                     };
                     p.default = Some(default);
                     p.span = p.span.merge(tok.span);

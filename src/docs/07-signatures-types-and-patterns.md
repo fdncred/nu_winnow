@@ -22,6 +22,9 @@ Arg ──":"──▶ Type ──token──▶ AfterType ──"="──▶ De
  └──","──▶ AfterCommaArg
 ```
 
+A type or default value that arrives while no parameter exists yet (`[: int]`,
+`[= 1]`) is dropped silently, which is what nu does with it.
+
 In `Arg`/`AfterCommaArg`/`AfterType` a token creates a parameter:
 
 | Token | Parameter |

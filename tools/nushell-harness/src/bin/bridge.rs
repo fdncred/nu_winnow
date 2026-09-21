@@ -34,9 +34,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use nu_protocol::ast::{
-    Assignment, Bits, Block, Boolean, Call, CellPath, Comparison, Expr, Expression, ExternalArgument,
-    FullCellPath, Keyword, ListItem, MatchPattern, Math, Operator, PathMember, Pattern, Pipeline, PipelineElement,
-    Range, RangeInclusion, RangeOperator, RecordItem, Table, Unit, ValueWithUnit,
+    Assignment, Bits, Block, Boolean, Call, CellPath, Comparison, Expr, Expression, ExternalArgument, FullCellPath,
+    Keyword, ListItem, MatchPattern, Math, Operator, PathMember, Pattern, Pipeline, PipelineElement, Range,
+    RangeInclusion, RangeOperator, RecordItem, Table, Unit, ValueWithUnit,
 };
 use nu_protocol::casing::Casing;
 use nu_protocol::debugger::WithoutDebug;
@@ -102,7 +102,10 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
             "nu" => NU_VARIABLE_ID,
             "in" => IN_VARIABLE_ID,
             "env" => ENV_VARIABLE_ID,
-            _ => self.ws.find_variable(format!("${name}").as_bytes()).ok_or_else(|| format!("variable `${name}` not found"))?,
+            _ => self
+                .ws
+                .find_variable(format!("${name}").as_bytes())
+                .ok_or_else(|| format!("variable `${name}` not found"))?,
         };
         // Record captures for every enclosing closure that does not declare the variable.
         if !matches!(id, NU_VARIABLE_ID | IN_VARIABLE_ID | ENV_VARIABLE_ID) {
@@ -266,7 +269,10 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                 let ns = d.to_nanoseconds().ok_or("duration too large")?;
                 let inner = self.expression(Expr::Int(ns), span, Type::Int);
                 (
-                    Expr::ValueWithUnit(Box::new(ValueWithUnit { expr: inner, unit: Spanned { item: Unit::Nanosecond, span } })),
+                    Expr::ValueWithUnit(Box::new(ValueWithUnit {
+                        expr: inner,
+                        unit: Spanned { item: Unit::Nanosecond, span },
+                    })),
                     Type::Duration,
                 )
             }
@@ -304,7 +310,9 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                 (Expr::Range(Box::new(Range { from, next, to, operator })), Type::Range)
             }
             w::ExprKind::Var(v) => (Expr::Var(self.resolve_var(v.name, span)?), Type::Any),
-            w::ExprKind::CellPath(c) => (Expr::CellPath(CellPath { members: self.members(&c.members) }), Type::CellPath),
+            w::ExprKind::CellPath(c) => {
+                (Expr::CellPath(CellPath { members: self.members(&c.members) }), Type::CellPath)
+            }
             w::ExprKind::FullCellPath(p) => {
                 let head = self.expr(&p.head)?;
                 let tail = self.members(&p.members);
@@ -326,7 +334,10 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                 for row in &t.rows {
                     rows.push(self.list_items(row)?.into_boxed_slice());
                 }
-                (Expr::Table(Table { columns: columns.into_boxed_slice(), rows: rows.into_boxed_slice() }), Type::table())
+                (
+                    Expr::Table(Table { columns: columns.into_boxed_slice(), rows: rows.into_boxed_slice() }),
+                    Type::table(),
+                )
             }
             w::ExprKind::Record(items) => {
                 let mut out = Vec::with_capacity(items.len());
@@ -353,7 +364,11 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
             w::ExprKind::UnaryNot(n) => (Expr::UnaryNot(Box::new(self.expr(&n.expr)?)), Type::Bool),
             w::ExprKind::Assignment(a) => {
                 let lhs = self.expr(&a.lhs)?;
-                let op = self.expression(Expr::Operator(Operator::Assignment(assign_op(a.op.item))), self.span(a.op.span), Type::Any);
+                let op = self.expression(
+                    Expr::Operator(Operator::Assignment(assign_op(a.op.item))),
+                    self.span(a.op.span),
+                    Type::Any,
+                );
                 let rhs_span = self.span(a.rhs.span);
                 let rhs_id = self.scoped_block(&a.rhs, rhs_span, false)?;
                 let rhs = self.expression(Expr::Subexpression(rhs_id), rhs_span, Type::Any);
@@ -506,7 +521,10 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
     // --- calls --------------------------------------------------------------------------------
 
     fn keyword_call(&mut self, name: &str, head: Span) -> LResult<Call> {
-        let decl_id = self.ws.find_decl(name.as_bytes()).ok_or_else(|| format!("keyword `{name}` is not registered in the engine"))?;
+        let decl_id = self
+            .ws
+            .find_decl(name.as_bytes())
+            .ok_or_else(|| format!("keyword `{name}` is not registered in the engine"))?;
         let mut call = Call::new(head);
         call.decl_id = decl_id;
         Ok(call)
@@ -531,12 +549,15 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                 w::Arg::Flag(f) if !end_of_options => {
                     let flag_span = self.span(f.span);
                     let flags: Vec<(Flag, usize)> = if f.long {
-                        let flag = sig.get_long_flag(f.name).ok_or_else(|| format!("`{}` has no flag `--{}`", sig.name, f.name))?;
+                        let flag = sig
+                            .get_long_flag(f.name)
+                            .ok_or_else(|| format!("`{}` has no flag `--{}`", sig.name, f.name))?;
                         vec![(flag, f.name.len() + 2)]
                     } else {
                         let mut out = Vec::new();
                         for (i, ch) in f.name.char_indices() {
-                            let flag = sig.get_short_flag(ch).ok_or_else(|| format!("`{}` has no flag `-{ch}`", sig.name))?;
+                            let flag =
+                                sig.get_short_flag(ch).ok_or_else(|| format!("`{}` has no flag `-{ch}`", sig.name))?;
                             out.push((flag, i + 1 + ch.len_utf8()));
                         }
                         out
@@ -556,12 +577,20 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                         } else {
                             None
                         };
-                        let short = if f.long { None } else { flag.short.map(|s| Spanned { item: s.to_string(), span: flag_span }) };
+                        let short = if f.long {
+                            None
+                        } else {
+                            flag.short.map(|s| Spanned { item: s.to_string(), span: flag_span })
+                        };
                         call.add_named((Spanned { item: flag.long.clone(), span: flag_span }, short, value));
                     }
                 }
                 w::Arg::Flag(f) => {
-                    let e = self.expression(Expr::String(format!("-{}{}", if f.long { "-" } else { "" }, f.name)), self.span(f.span), Type::String);
+                    let e = self.expression(
+                        Expr::String(format!("-{}{}", if f.long { "-" } else { "" }, f.name)),
+                        self.span(f.span),
+                        Type::String,
+                    );
                     call.add_positional(e);
                     positional_idx += 1;
                 }
@@ -680,8 +709,12 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                 default_value,
             };
             match &p.kind {
-                w::ParamKind::Positional { optional: false } => sig.required_positional.push(positional(p.name.item, shape, default_value)),
-                w::ParamKind::Positional { optional: true } => sig.optional_positional.push(positional(p.name.item, shape, default_value)),
+                w::ParamKind::Positional { optional: false } => {
+                    sig.required_positional.push(positional(p.name.item, shape, default_value))
+                }
+                w::ParamKind::Positional { optional: true } => {
+                    sig.optional_positional.push(positional(p.name.item, shape, default_value))
+                }
                 w::ParamKind::Rest => sig.rest_positional = Some(positional(p.name.item, shape, default_value)),
                 w::ParamKind::Flag { long, short } => sig.named.push(Flag {
                     long: long.map(|l| l.item.to_string()).unwrap_or_default(),
@@ -790,7 +823,9 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
             w::PatternKind::Value(e) => Pattern::Expression(Box::new(self.expr(e)?)),
             w::PatternKind::Variable(name) => Pattern::Variable(self.declare_var(name, span, false)),
             w::PatternKind::Wildcard => Pattern::IgnoreValue,
-            w::PatternKind::List(items) => Pattern::List(items.iter().map(|i| self.pattern(i)).collect::<LResult<_>>()?),
+            w::PatternKind::List(items) => {
+                Pattern::List(items.iter().map(|i| self.pattern(i)).collect::<LResult<_>>()?)
+            }
             w::PatternKind::Record(fields) => {
                 let mut out = Vec::with_capacity(fields.len());
                 for (name, pat) in fields {
@@ -1006,7 +1041,12 @@ fn main() {
                 Ok(v) => v.to_expanded_string(", ", &engine_state.config),
                 Err(e) => format!("error: {}", e.lines().next().unwrap_or("")),
             };
-            println!("{} {src}\n    bridge:    {}\n    nu-parser: {}", if same { "ok " } else { "!! " }, show(&bridge), show(&reference));
+            println!(
+                "{} {src}\n    bridge:    {}\n    nu-parser: {}",
+                if same { "ok " } else { "!! " },
+                show(&bridge),
+                show(&reference)
+            );
         }
         println!("{agree}/{} scripts produced identical results", DEMO.len());
         if agree != DEMO.len() {

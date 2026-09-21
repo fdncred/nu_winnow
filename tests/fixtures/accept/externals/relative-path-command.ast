@@ -1,0 +1,6 @@
+Block 0..23
+  Pipeline 0..6
+    Call `../foo` 0..6
+  Pipeline 7..22
+    Call `./script.sh` 7..22
+      Flag --x 19..22

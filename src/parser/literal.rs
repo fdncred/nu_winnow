@@ -42,6 +42,16 @@ pub fn parse_int(text: &str) -> Option<i64> {
     u64::from_str_radix(digits, radix).ok().map(|n| n as i64)
 }
 
+/// The radix announced by a `0x`, `0o` or `0b` prefix, if any.
+pub fn radix_prefix(text: &str) -> Option<u32> {
+    match text.as_bytes() {
+        [b'0', b'x', ..] => Some(16),
+        [b'0', b'o', ..] => Some(8),
+        [b'0', b'b', ..] => Some(2),
+        _ => None,
+    }
+}
+
 /// Parse a float literal. Accepts everything Rust's `f64::from_str` accepts
 /// (including `inf`, `NaN`, `1e5`, `.5`), with optional `_` separators.
 pub fn parse_float(text: &str) -> Option<f64> {
@@ -295,7 +305,7 @@ pub fn unescape(text: &str, base: usize) -> Result<Cow<'_, str>, Diagnostic> {
                     return Err(Diagnostic::new(
                         ErrorKind::InvalidLiteral {
                             kind: "string",
-                            message: "incomplete hex escape `\\xHH`, expected 2 hex digits".into(),
+                            message: "incomplete hex escape '\\xHH', expected 2 hex digits".into(),
                         },
                         Span::new(base + idx, base + text.len().min(idx + 4)),
                     ));
@@ -305,7 +315,7 @@ pub fn unescape(text: &str, base: usize) -> Result<Cow<'_, str>, Diagnostic> {
                     return Err(Diagnostic::new(
                         ErrorKind::InvalidLiteral {
                             kind: "string",
-                            message: format!("hex escape `\\x{hex}` is not valid UTF-8; use `\\u{{{hex}}}`"),
+                            message: format!("invalid hex escape '\\x{hex}', not valid UTF-8; use '\\u{{{hex}}}'"),
                         },
                         Span::new(base + idx, base + idx + 4),
                     ));
@@ -321,7 +331,7 @@ pub fn unescape(text: &str, base: usize) -> Result<Cow<'_, str>, Diagnostic> {
                     return Err(Diagnostic::new(
                         ErrorKind::InvalidLiteral {
                             kind: "string",
-                            message: "unicode escape must look like `\\u{XXXX}`".into(),
+                            message: "incomplete unicode escape '\\u{...}', missing closing '}'".into(),
                         },
                         Span::new(base + idx, base + text.len().min(idx + 3)),
                     ));
@@ -333,7 +343,9 @@ pub fn unescape(text: &str, base: usize) -> Result<Cow<'_, str>, Diagnostic> {
                     return Err(Diagnostic::new(
                         ErrorKind::InvalidLiteral {
                             kind: "string",
-                            message: format!("invalid unicode escape `\\u{{{hex}}}`"),
+                            message: format!(
+                                "invalid unicode escape '\\u{{{hex}}}', must be 1-6 hex digits, max codepoint 0x10FFFF"
+                            ),
                         },
                         Span::new(base + idx, base + idx + 3 + close),
                     ));

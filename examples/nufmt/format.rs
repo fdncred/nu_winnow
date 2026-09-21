@@ -661,7 +661,11 @@ impl<'a> Formatter<'a> {
                 && only.redirection.is_none()
                 && matches!(
                     only.expr.kind,
-                    ExprKind::Call(_) | ExprKind::ExternalCall(_) | ExprKind::Var(_) | ExprKind::FullCellPath(_)
+                    ExprKind::Call(_)
+                        | ExprKind::DynamicCall(_)
+                        | ExprKind::ExternalCall(_)
+                        | ExprKind::Var(_)
+                        | ExprKind::FullCellPath(_)
                 )
             {
                 expr = &only.expr;
@@ -1300,8 +1304,28 @@ impl<'a> Formatter<'a> {
                 if c.args.is_empty() && self.repair_packed_if(c.head.span) {
                     return;
                 }
-                self.spanned_as(c.head.span, &Self::collapse_spaces(self.text(c.head.span)));
+                let head = Self::collapse_spaces(self.text(c.head.span));
+                match c.sigil {
+                    Some(sigil) if sigil.end == c.head.span.start => {
+                        self.spanned_as(sigil, "%");
+                        self.glued(|f| f.spanned_as(c.head.span, &head));
+                    }
+                    Some(sigil) => {
+                        self.spanned_as(sigil, "%");
+                        self.spanned_as(c.head.span, &head);
+                    }
+                    None => self.spanned_as(c.head.span, &head),
+                }
                 self.args(Some(c.head.span.end), &c.args);
+            }
+            ExprKind::DynamicCall(d) => {
+                self.spanned_as(d.sigil, "%");
+                if d.sigil.end == d.head.span.start {
+                    self.glued(|f| f.expr(&d.head));
+                } else {
+                    self.expr(&d.head);
+                }
+                self.args(Some(d.head.span.end), &d.args);
             }
             ExprKind::ExternalCall(c) => {
                 self.word("^");

@@ -1,0 +1,6 @@
+error: expected name
+  --> reject/modules/use-list-with-non-names.nu:1:10
+  |
+1 | use std [1 2]
+  |          ^
+  = while parsing use

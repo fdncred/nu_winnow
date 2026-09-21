@@ -1,0 +1,6 @@
+error: expected signature like `[param: type]`
+  --> reject/def/missing-name.nu:1:8
+  |
+1 | def [] {}
+  |        ^^
+  = while parsing def

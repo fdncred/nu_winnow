@@ -343,8 +343,16 @@ impl<'a> Printer<'a> {
                 });
             }
             ExprKind::Call(c) => {
-                self.line(format_args!("Call `{}` {span}", c.head.name));
+                let sigil = if c.sigil.is_some() { "%" } else { "" };
+                self.line(format_args!("Call `{sigil}{}` {span}", c.head.name));
                 self.nested(|p| p.args(&c.args));
+            }
+            ExprKind::DynamicCall(d) => {
+                self.line(format_args!("DynamicCall {span}"));
+                self.nested(|p| {
+                    p.expr(&d.head);
+                    p.args(&d.args);
+                });
             }
             ExprKind::ExternalCall(c) => {
                 self.line(format_args!("ExternalCall {span}"));

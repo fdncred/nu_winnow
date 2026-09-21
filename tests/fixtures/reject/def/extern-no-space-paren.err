@@ -1,0 +1,6 @@
+error: expected signature
+  --> reject/def/extern-no-space-paren.nu:1:19
+  |
+1 | extern cmd(--flag)
+  |                   ^
+  = while parsing extern

@@ -1,0 +1,6 @@
+error: expected table row
+  --> reject/tables/non-list-row.nu:1:7
+  |
+1 | [[a]; 1]
+  |       ^
+  = help: all table rows must be lists

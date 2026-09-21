@@ -197,6 +197,13 @@ impl<'s, 'a> St<'s, 'a> {
         shared.config.is_prefix(word) || shared.decl_scopes.iter().any(|scope| scope.prefixes.contains(word))
     }
 
+    /// Whether `name` is one of the configured (built-in) commands, ignoring
+    /// declarations in the file; `None` when no commands are configured at all.
+    pub fn is_builtin_command(&self, name: &str) -> Option<bool> {
+        let config = &self.shared.borrow().config;
+        (!config.is_empty()).then(|| config.is_known(name))
+    }
+
     /// Whether `name` was declared with `def`/`extern`/`alias` in an enclosing block.
     pub fn is_declared_command(&self, name: &str) -> bool {
         self.shared.borrow().decl_scopes.iter().any(|scope| scope.names.contains(name))
@@ -208,6 +215,11 @@ impl<'s, 'a> St<'s, 'a> {
         if let Some(scope) = shared.decl_scopes.last_mut() {
             scope.insert(name);
         }
+    }
+
+    /// `true` outside every block, closure and subexpression.
+    pub fn at_top_level(&self) -> bool {
+        self.shared.borrow().decl_scopes.len() == 1
     }
 
     /// Enter a declaration scope.

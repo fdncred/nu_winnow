@@ -94,6 +94,11 @@ fn any_value<'a>(st: St<'_, 'a>, span: Span, text: &'a str) -> PResult<Expr<'a>>
     if let Some(int) = literal::parse_int(text) {
         return Ok(Expr::new(ExprKind::Int(int), span));
     }
+    // A radix prefix commits the word to being an int, as in Nushell: `0b2`
+    // is an error, not a bare word.
+    if let Some(radix) = literal::radix_prefix(text) {
+        return Err(invalid_literal("int", &format!("invalid digits for radix {radix}"), span));
+    }
     if let Some(float) = literal::parse_float(text) {
         return Ok(Expr::new(ExprKind::Float(float), span));
     }

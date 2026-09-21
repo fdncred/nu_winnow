@@ -1,0 +1,5 @@
+error: expected record value
+  --> reject/records/pipe-value.nu:1:6
+  |
+1 | { a: || }
+  |      ^^

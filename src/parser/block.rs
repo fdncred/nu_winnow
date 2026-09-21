@@ -204,6 +204,11 @@ fn pipeline<'a>(st: St<'_, 'a>, c: &mut Cursor<'_>, leading_comments: Vec<Commen
         if let Some(pipe_span) = pipe
             && c.peek().is_none_or(|t| matches!(t.kind, TokenKind::Semicolon | TokenKind::Eol))
         {
+            // nu tolerates a `|` that ends the whole file, but not one that ends a
+            // block, a statement (`let x = 1 | ;`) or anything else.
+            if c.peek().is_none() && st.at_top_level() && c.end_span().start == st.src.len() && !elements.is_empty() {
+                break;
+            }
             return Err(cut(
                 Diagnostic::new(ErrorKind::UnexpectedEof("command after `|`"), pipe_span).with_context("pipeline")
             ));
@@ -302,8 +307,9 @@ fn raw_command(st: St<'_, '_>, c: &mut Cursor<'_>) -> PResult<RawCommand> {
     Ok(raw)
 }
 
-/// Leading `@name args` lines, each up to the end of its line; blank and
-/// comment lines may separate them from the definition that follows.
+/// Leading `@name args` lines, each up to the end of its line. Like nu, the
+/// definition must follow on the very next line: a blank or comment line in
+/// between is an error.
 fn attribute_lines(st: St<'_, '_>, c: &mut Cursor<'_>, raw: &mut RawCommand) -> PResult<()> {
     while c.peek().is_some_and(|t| t.kind == TokenKind::Item && st.tok(t).starts_with('@')) {
         let mut attr = Vec::new();
@@ -329,16 +335,11 @@ fn attribute_lines(st: St<'_, '_>, c: &mut Cursor<'_>, raw: &mut RawCommand) -> 
             c.next();
         }
         raw.attributes.push(attr);
-        while let Some(tok) = c.peek() {
-            match tok.kind {
-                TokenKind::Eol => {}
-                TokenKind::Comment => {
-                    st.comment(tok.span);
-                    raw.comments.push(Comment { span: tok.span });
-                }
-                _ => break,
-            }
-            c.next();
+        if let Some(tok) = c.peek()
+            && matches!(tok.kind, TokenKind::Eol | TokenKind::Comment)
+        {
+            return Err(cut(Diagnostic::message("attributes must be followed by a definition", tok.span)
+                .with_help("put the `def`, `extern` or `export` on the line right after the attributes")));
         }
     }
     Ok(())

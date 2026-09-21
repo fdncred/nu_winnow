@@ -275,6 +275,8 @@ pub enum ExprKind<'a> {
     /// An internal command call (or a call to an unknown command, which Nushell
     /// would run as an external command).
     Call(Call<'a>),
+    /// `%$cmd args` / `%(expr) args`: a call whose command name is computed.
+    DynamicCall(DynamicCall<'a>),
     /// `^cmd args`.
     ExternalCall(ExternalCall<'a>),
     /// `FOO=bar BAZ=qux cmd args`.
@@ -1027,6 +1029,23 @@ pub struct CallHead<'a> {
 pub struct Call<'a> {
     /// The command name.
     pub head: CallHead<'a>,
+    /// The arguments in source order.
+    pub args: Vec<Arg<'a>>,
+    /// The span of a `%` sigil (`%ls`, `% ls`), which makes Nushell run the
+    /// built-in command of that name even when a custom command or alias
+    /// shadows it.
+    pub sigil: Option<Span>,
+}
+
+/// `%$cmd args` or `%(expr) args`: the `%` sigil with a command name computed
+/// at run time, which must name a built-in command.
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct DynamicCall<'a> {
+    /// The span of the `%`.
+    pub sigil: Span,
+    /// The expression naming the command: a variable, cell path or subexpression.
+    pub head: Box<Expr<'a>>,
     /// The arguments in source order.
     pub args: Vec<Arg<'a>>,
 }

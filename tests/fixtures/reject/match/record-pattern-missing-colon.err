@@ -1,0 +1,6 @@
+error: expected `:` after field name in record pattern
+  --> reject/match/record-pattern-missing-colon.nu:1:20
+  |
+1 | match {a: 1} { {a 1} => 1 }
+  |                    ^
+  = while parsing match

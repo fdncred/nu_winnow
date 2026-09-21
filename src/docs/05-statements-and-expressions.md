@@ -157,7 +157,8 @@ in nu-parser's `expand_to_cell_path`.
 ## Assignments
 
 `assignment` splits the items at the first `Assign` token. The left side must
-parse to a `Var` or a `FullCellPath` on a `Var`; the right side (everything
+parse to a `Var`, a `Subexpression` or a `FullCellPath` on one of those (nu
+accepts `(1) = 2` at parse time and fails at run time); the right side (everything
 absorbed to the end of the line) is parsed with `parse_block` and stored as
 a `Block`, matching nu, where `$x = ls | length` assigns the pipeline's
 result.
@@ -183,6 +184,14 @@ command (`ParseConfig` and the declaration scopes both index prefixes).
 
 Whether `--name value` binds `value` to the flag is a signature question and
 is left to the consumer; the bridge in `tools/` shows how (chapter 09).
+
+The `%` sigil (`percent_call`) forces the built-in command even when a custom
+command or alias shadows its name. `%ls` and `% ls` give a `Call` whose
+`sigil` is the span of the `%`; `%$cmd` and `%(expr)` give a `DynamicCall`
+whose head is the `$` expression or subexpression. Like nu, a quoted or
+otherwise non-bare name after `%` is an error, and a bare name that is not in
+the configured command set is rejected with "percent sigil requires a
+built-in command" (skipped when the `ParseConfig` knows no commands at all).
 
 ## External calls and environment shorthand
 

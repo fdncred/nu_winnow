@@ -371,6 +371,37 @@ fn item(i: &mut Input<'_>, opts: LexOptions) -> PResult<TokenKind> {
     let text = *i.input.as_ref();
     let bytes = text.as_bytes();
     let base = i.state.0 + i.current_token_start();
+    let off = scan_item(bytes, base, opts, false)?;
+    if off == 0 {
+        return Err(cut(Diagnostic::new(ErrorKind::UnexpectedEof("command"), Span::point(base))));
+    }
+    let item_text = &bytes[..off];
+    let kind = classify(item_text).map_err(|(kind, help)| {
+        let mut d = Diagnostic::new(kind, Span::new(base, base + off));
+        if let Some(h) = help {
+            d = d.with_help(h);
+        }
+        cut(d)
+    })?;
+    i.next_slice(off);
+    Ok(kind)
+}
+
+/// The offset of the bracket closing the group that `text` opens with
+/// (`(a)/b` gives 2), scanning exactly as the lexer does: quotes, raw
+/// strings, comments and nested brackets are respected. `None` if `text`
+/// does not start with a bracket or the group is not closed.
+pub(crate) fn group_end(text: &str) -> Option<usize> {
+    if !text.starts_with(['(', '[', '{']) {
+        return None;
+    }
+    scan_item(text.as_bytes(), 0, LexOptions::BLOCK, true).ok().map(|off| off - 1)
+}
+
+/// Scan the item at the start of `bytes` (whose first byte is at absolute
+/// offset `base`) and return its length. With `first_group` set, stop right
+/// after the bracket closing the group opened by the first byte.
+fn scan_item(bytes: &[u8], base: usize, opts: LexOptions, first_group: bool) -> PResult<usize> {
     let abs = |off: usize| base + off;
 
     // The quote we are inside, with the offset where it opened.
@@ -444,7 +475,13 @@ fn item(i: &mut Input<'_>, opts: LexOptions) -> PResult<TokenKind> {
                         brackets.pop();
                     }
                 }
-                b']' | b'}' | b')' => close_bracket(&mut brackets, c, abs(off))?,
+                b']' | b'}' | b')' => {
+                    close_bracket(&mut brackets, c, abs(off))?;
+                    if first_group && brackets.is_empty() {
+                        off += 1;
+                        break;
+                    }
+                }
                 b'r' if bytes.get(off + 1) == Some(&b'#') => {
                     off = raw_string_end(bytes, off, abs)?;
                     prev = Some(b'#');
@@ -472,20 +509,7 @@ fn item(i: &mut Input<'_>, opts: LexOptions) -> PResult<TokenKind> {
     if let Some(&(open, open_at)) = brackets.last() {
         return Err(unclosed(open.closer(), open_at, abs(off)));
     }
-    if off == 0 {
-        return Err(cut(Diagnostic::new(ErrorKind::UnexpectedEof("command"), Span::point(base))));
-    }
-
-    let item_text = &bytes[..off];
-    let kind = classify(item_text).map_err(|(kind, help)| {
-        let mut d = Diagnostic::new(kind, Span::new(base, abs(off)));
-        if let Some(h) = help {
-            d = d.with_help(h);
-        }
-        cut(d)
-    })?;
-    i.next_slice(off);
-    Ok(kind)
+    Ok(off)
 }
 
 fn unclosed(delimiter: &'static str, open_at: usize, at: usize) -> winnow::error::ErrMode<Diagnostic> {

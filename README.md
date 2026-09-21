@@ -116,7 +116,8 @@ the parser, exactly as in `nu-parser` before signature lookup: whether a flag
 takes the following argument as its value (`--flag value` is a `Flag` followed
 by a `Positional`; `--flag=value` carries its value), and whether an unknown
 head is an internal or external command (all bare heads become `Call`; `^cmd`
-becomes `ExternalCall`). An evaluator applies its signatures on top.
+becomes `ExternalCall`; `%cmd` is a `Call` with a `sigil` and `%$cmd` a
+`DynamicCall`). An evaluator applies its signatures on top.
 
 ## Design
 

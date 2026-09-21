@@ -90,8 +90,9 @@ Two helpers handle the layouts Nushell allows around a pipe:
   | length
   ```
 
-A `|` followed by end of input or `;` is an error ("expected command after
-`|`").
+A `|` followed by `;`, or by the end of a block, closure or subexpression,
+is an error ("expected command after `|`"). A `|` that ends the whole file
+is tolerated and dropped, as `nu-check` tolerates it.
 
 ## Commands: `RawCommand`
 
@@ -127,8 +128,10 @@ The rules encoded in its loop:
   `or`).
 * **`Eol`**, **`;`**, **`Eof`** end the command (they are not consumed here).
 * **Attribute lines** (`attribute_lines`): while the next item starts with
-  `@`, the items up to the end of the line become one attribute; blank and
-  comment lines between attributes and the definition are allowed.
+  `@`, the items up to the end of the line become one attribute. The next
+  attribute or the definition must start on the very next line; a blank or
+  comment-only line in between is an error, as in nu (a trailing comment on
+  the attribute line is fine).
 
 ## Predeclaration
 

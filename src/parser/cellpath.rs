@@ -66,8 +66,10 @@ pub fn full_cell_path<'a>(st: St<'_, 'a>, span: Span, implicit: bool) -> PResult
     };
     let head_text = st.tok(head_tok);
     let (head, member_tokens) = match head_text.as_bytes() {
-        // `(pwd)/x`: not a subexpression head but a bare interpolation.
-        [b'(', ..] if !head_text.ends_with(')') => return strings::interpolation(st, span),
+        // `(pwd)/x` and `(a)/b/(c)`: not a subexpression head but a bare interpolation.
+        [b'(', ..] if crate::lexer::group_end(head_text) != Some(head_text.len() - 1) => {
+            return strings::interpolation(st, span);
+        }
         [b'(', ..] => (value::subexpression(st, head_tok.span)?, &items[1..]),
         [b'[', ..] => (collections::list_or_table(st, head_tok.span)?, &items[1..]),
         [b'{', ..] => (collections::record(st, head_tok.span)?, &items[1..]),

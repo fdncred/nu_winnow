@@ -51,7 +51,9 @@ Statement bodies (`if`, `for`, `def`, ...) do not go through `value` at all:
 of one), filesize, duration, datetime, int, float, and finally string. The order
 matters: `1..3` must be tested as a range before `1.` could be read as a
 float, and `1kb` as a filesize before `1` as an int. A matched unit with a
-bad number (`1..2sec`) is an error, not a fallback, as in nu.
+bad number (`1..2sec`) is an error, not a fallback, as in nu, and so is a
+word with a radix prefix that is not a number (`0b2`, `0x`): nu commits to an
+int as soon as it sees `0x`/`0o`/`0b`.
 
 ## Literals (`literal.rs`)
 
@@ -185,8 +187,11 @@ may start on a later line than the `{`.
   Assign]`) are tolerated as nu tolerates them.
 * `record`: lexes entry by entry with `lex_prefix_at`: key with `RECORD_KEY`,
   the `:`, then the value with `RECORD_VALUE`. Keys are parsed with
-  `Hint::String` (bare, quoted, `$var`, `(expr)`, interpolation). Spreads
-  `...$r` are allowed. Comments inside are recorded.
+  `Hint::String` (bare, quoted, `$var`, `(expr)`, interpolation); `true`,
+  `false` and `null` are refused as bare keys. Spreads `...$r` are allowed.
+  Comments inside are recorded. Like nu (`check_record_key_or_value`), a bare
+  word or bare interpolation containing `:` is refused as a key or value
+  (`{a: http://x}`, `{ :: x }`): quote it.
 * `subexpression`: lex with `SUBEXPRESSION` (newlines are whitespace) and
   parse a block in a new scope.
 

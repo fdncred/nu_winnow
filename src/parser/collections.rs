@@ -1,6 +1,6 @@
 //! Lists, tables and records.
 
-use crate::ast::{Expr, ExprKind, ListItem, RecordItem, StringLit, Table};
+use crate::ast::{Expr, ExprKind, InterpPart, ListItem, Quote, RecordItem, StringLit, Table};
 use crate::error::Diagnostic;
 use crate::input::{PResult, cut};
 use crate::lexer::{LexOptions, Token, TokenKind, lex_prefix_at};
@@ -120,7 +120,12 @@ pub fn record<'a>(st: St<'_, 'a>, span: Span) -> PResult<Expr<'a>> {
             items.push(RecordItem::Spread { dots, expr });
             continue;
         }
+        if matches!(key_text, "true" | "false" | "null") {
+            return Err(cut(Diagnostic::expected("string", key_tok.span)
+                .with_help(format!("`{key_text}` is a value; quote it to use it as a record key"))));
+        }
         let key = value::value(st, key_tok.span, Hint::String)?;
+        check_bare_colon(st, &key, "key")?;
         let colon = match next(LexOptions::RECORD_KEY)? {
             Some(colon) if st.tok(&colon) == ":" => colon,
             Some(other) => {
@@ -138,7 +143,34 @@ pub fn record<'a>(st: St<'_, 'a>, span: Span) -> PResult<Expr<'a>> {
             Some(tok) => return Err(cut(Diagnostic::expected("record value", tok.span))),
             None => return Err(cut(Diagnostic::expected("record value", colon.span.past()))),
         };
+        check_bare_colon(st, &value, "value")?;
         items.push(RecordItem::Pair { key, colon: colon.span, value });
     }
     Ok(Expr::new(ExprKind::Record(items), span))
+}
+
+/// Like Nushell, refuse a bare word containing `:` as a record key or value
+/// (`{a: x:y}`, `{a: http://x}`): it is almost always a missing quote or
+/// separator, and the lexer would otherwise split it unpredictably.
+fn check_bare_colon(st: St<'_, '_>, expr: &Expr<'_>, position: &'static str) -> PResult<()> {
+    let bare_spans: Vec<Span> = match &expr.kind {
+        ExprKind::String(s) if s.quote == Quote::Bare => vec![expr.span],
+        ExprKind::Interpolation(i) if i.quote == Quote::Bare => i
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                InterpPart::Text { span, .. } => Some(*span),
+                InterpPart::Expr(_) => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    for span in bare_spans {
+        if let Some(at) = st.text(span).find(':') {
+            let colon = Span::new(span.start + at, span.start + at + 1);
+            return Err(cut(Diagnostic::message(format!("colon in bare word specifying record {position}"), colon)
+                .with_help(format!("quote the {position} if the `:` is part of it"))));
+        }
+    }
+    Ok(())
 }

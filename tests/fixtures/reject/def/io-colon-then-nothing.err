@@ -1,0 +1,6 @@
+error: expected input/output types after `:`
+  --> reject/def/io-colon-then-nothing.nu:1:9
+  |
+1 | def q []: {}
+  |         ^
+  = while parsing def

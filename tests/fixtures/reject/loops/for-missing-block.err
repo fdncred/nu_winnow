@@ -1,0 +1,6 @@
+error: expected block
+  --> reject/loops/for-missing-block.nu:1:13
+  |
+1 | for x in [1]
+  |             ^
+  = while parsing for

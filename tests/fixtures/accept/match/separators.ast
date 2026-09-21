@@ -1,0 +1,23 @@
+Block 0..51
+  Pipeline 0..50
+    Match 0..50
+      Int 1 6..7
+      Arm 10..16
+        Pattern value 10..11
+          Int 1 10..11
+        Call `a` 15..16
+      Arm 18..24
+        Pattern value 18..19
+          Int 2 18..19
+        Call `b` 23..24
+      Arm 25..31
+        Pattern value 25..26
+          Int 3 25..26
+        Call `c` 30..31
+      Arm 33..39
+        Pattern value 33..34
+          Int 4 33..34
+        Call `d` 38..39
+      Arm 42..48
+        Pattern _ 42..43
+        Call `e` 47..48

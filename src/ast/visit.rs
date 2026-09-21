@@ -182,6 +182,10 @@ pub fn walk_expr<'a, V: Visitor<'a> + ?Sized>(v: &mut V, expr: &Expr<'a>) {
             v.visit_block(&a.rhs);
         }
         ExprKind::Call(c) => walk_args(v, &c.args),
+        ExprKind::DynamicCall(d) => {
+            v.visit_expr(&d.head);
+            walk_args(v, &d.args);
+        }
         ExprKind::ExternalCall(c) => {
             v.visit_expr(&c.head);
             for arg in &c.args {

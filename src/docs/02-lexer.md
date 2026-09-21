@@ -173,6 +173,10 @@ Once the item's extent is known, `classify` turns the exact spellings of
 assignment and redirection operators into their token kinds, and the input is
 advanced with `i.next_slice(off)`.
 
+`group_end(text)` reuses the same scanner to find the bracket that closes
+the group a text starts with, so that `value.rs` can tell a subexpression
+`(a)` from the bare interpolation `(a)/b/(c)` without a second state machine.
+
 ## Pipe continuation is not the lexer's job
 
 A `|` at the start of a line continues the previous pipeline:

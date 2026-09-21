@@ -91,7 +91,10 @@ pub fn main() {
     let _ = time_nu_parser(&engine_state, "warm", warm, 1);
     let _ = time_winnow(&config, std::str::from_utf8(warm).unwrap(), 1);
 
-    println!("{:<52} {:>8} {:>11} {:>11} {:>7} {:>5} {:>5}", "file", "bytes", "nu-parser", "winnow", "ratio", "nuErr", "wErr");
+    println!(
+        "{:<52} {:>8} {:>11} {:>11} {:>7} {:>5} {:>5}",
+        "file", "bytes", "nu-parser", "winnow", "ratio", "nuErr", "wErr"
+    );
     let (mut bytes_total, mut nu_total, mut w_total) = (0usize, Duration::ZERO, Duration::ZERO);
     for file in &files {
         let Ok(src) = std::fs::read_to_string(file) else { continue };
@@ -104,8 +107,17 @@ pub fn main() {
         nu_total += nu_avg;
         w_total += w_avg;
         let ratio = nu_avg.as_secs_f64() / w_avg.as_secs_f64().max(1e-9);
-        let short: String = file.display().to_string().chars().rev().take(50).collect::<Vec<_>>().into_iter().rev().collect();
-        println!("{short:<52} {:>8} {:>11} {:>11} {:>6.1}x {:>5} {:>5}", src.len(), fmt(nu_avg), fmt(w_avg), ratio, nu_err, w_err);
+        let short: String =
+            file.display().to_string().chars().rev().take(50).collect::<Vec<_>>().into_iter().rev().collect();
+        println!(
+            "{short:<52} {:>8} {:>11} {:>11} {:>6.1}x {:>5} {:>5}",
+            src.len(),
+            fmt(nu_avg),
+            fmt(w_avg),
+            ratio,
+            nu_err,
+            w_err
+        );
     }
     let ratio = nu_total.as_secs_f64() / w_total.as_secs_f64().max(1e-9);
     println!("{}", "-".repeat(104));

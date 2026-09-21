@@ -1,0 +1,5 @@
+error: expected `def`, `extern` or `export` after attributes
+  --> reject/calls/attributes-before-let.nu:2:1
+  |
+2 | let y = 1
+  | ^^^
