@@ -6,7 +6,7 @@
 #[allow(dead_code)]
 mod format;
 
-use format::{Note, Options, format, format_with_notes};
+use format::{IndentChar, Note, Options, format, format_with_notes};
 use nu_winnow_parser::{parse, pretty};
 
 /// The pretty-printed tree with all spans removed.
@@ -29,20 +29,30 @@ fn structure(src: &str) -> String {
     out
 }
 
-fn check(name: &str, src: &str) {
-    let options = Options::default();
-    let once = format(src, &options).unwrap_or_else(|e| panic!("{name}: {}", e.render(src, Some(name))));
-    let twice = format(&once, &options)
+/// Format twice with `options`; the second pass must be a no-op and no
+/// comment may be lost. Returns the formatted text.
+fn check_with(name: &str, src: &str, options: &Options) -> String {
+    let once = format(src, options).unwrap_or_else(|e| panic!("{name}: {}", e.render(src, Some(name))));
+    let twice = format(&once, options)
         .unwrap_or_else(|e| panic!("{name} (second pass): {}\n---\n{once}", e.render(&once, Some(name))));
     assert_eq!(once, twice, "{name}: formatting is not idempotent");
+    let before = parse(src).unwrap().comments.len();
+    let after = parse(&once).unwrap().comments.len();
+    assert_eq!(before, after, "{name}: comments were lost\n--- formatted:\n{once}");
+    once
+}
+
+/// With whitespace-only options the tree must not change at all; with the
+/// defaults (which may drop redundant parentheses and unquote match
+/// patterns) the output must still be idempotent and keep every comment.
+fn check(name: &str, src: &str) {
+    let once = check_with(name, src, &Options::default().whitespace_only());
     assert_eq!(
         structure(src),
         structure(&once),
         "{name}: formatting changed the program structure\n--- formatted:\n{once}"
     );
-    let before = parse(src).unwrap().comments.len();
-    let after = parse(&once).unwrap().comments.len();
-    assert_eq!(before, after, "{name}: comments were lost\n--- formatted:\n{once}");
+    check_with(name, src, &Options::default());
 }
 
 #[test]
@@ -72,11 +82,11 @@ fn normalises_whitespace() {
     assert_eq!(fmt("{a:1,b:[x y]}"), "{a: 1, b: [x y]}\n");
     assert_eq!(fmt("def f [x:int,--flag(-f)] {$x}"), "def f [x: int, --flag(-f)] { $x }\n");
     assert_eq!(fmt("if $x {1} else {2}"), "if $x { 1 } else { 2 }\n");
-    assert_eq!(fmt("def f [] {\nls\n| length\n}"), "def f [] {\n    ls\n        | length\n}\n");
-    assert_eq!(fmt("ls\n| each {|x|\n$x\n}"), "ls\n    | each {|x|\n        $x\n    }\n");
+    assert_eq!(fmt("def f [] {\nls\n| length\n}"), "def f [] {\n    ls\n    | length\n}\n");
+    assert_eq!(fmt("ls\n| each {|x|\n$x\n}"), "ls\n| each {|x| $x }\n");
     assert_eq!(fmt("[\n1\n# c\n2\n]"), "[\n    1\n    # c\n    2\n]\n");
-    assert_eq!(fmt("ls # trailing\n\n\n\npwd"), "ls  # trailing\n\npwd\n");
-    assert_eq!(fmt("each {|x|\n  $x\n}"), "each {|x|\n    $x\n}\n");
+    assert_eq!(fmt("ls # trailing\n\n\n\npwd"), "ls # trailing\n\npwd\n");
+    assert_eq!(fmt("each {|x|\n  $x\n}"), "each {|x| $x }\n");
     assert_eq!(fmt("$\"a (1 + 1)\" | print"), "$\"a (1 + 1)\" | print\n");
 }
 
@@ -115,4 +125,134 @@ fn splits_compact_row_conditions() {
         assert_eq!(out.trim_end(), src, "{src}");
         assert!(notes.is_empty(), "{src}");
     }
+}
+
+fn with(f: impl FnOnce(&mut Options)) -> Options {
+    let mut options = Options::default();
+    f(&mut options);
+    options
+}
+
+/// Every option, switched each way, on a small input.
+#[test]
+fn options_change_layout() {
+    let fmt = |s: &str, o: &Options| format(s, o).unwrap();
+    let default = Options::default();
+
+    // comment_spacing
+    assert_eq!(fmt("ls # c", &default), "ls # c\n");
+    assert_eq!(fmt("ls # c", &with(|o| o.comment_spacing = 2)), "ls  # c\n");
+
+    // keep_alignment
+    let aligned = "let a     = 1\nlet bbbbb = 2\nsource   x.nu\nls   # c\nmatch $x {\n    \"rtk\"        => 1\n    _            => 2\n}\n";
+    assert_eq!(
+        fmt(aligned, &default),
+        "let a = 1\nlet bbbbb = 2\nsource x.nu\nls # c\nmatch $x {\n    rtk => 1\n    _ => 2\n}\n"
+    );
+    assert_eq!(
+        fmt(aligned, &with(|o| o.keep_alignment = true)),
+        "let a     = 1\nlet bbbbb = 2\nsource   x.nu\nls   # c\nmatch $x {\n    rtk          => 1\n    _            => 2\n}\n"
+    );
+
+    // trim_trailing_whitespace
+    assert_eq!(fmt("ls # c   \n# d  \n", &default), "ls # c\n# d\n");
+    assert_eq!(fmt("ls # c   \n# d  \n", &with(|o| o.trim_trailing_whitespace = false)), "ls # c   \n# d  \n");
+
+    // indent_pipelines
+    assert_eq!(fmt("ls\n| length", &default), "ls\n| length\n");
+    assert_eq!(fmt("ls\n| length", &with(|o| o.indent_pipelines = true)), "ls\n    | length\n");
+
+    // strip_redundant_parens
+    let parens = "let x = (ls | length)\nlet y = ((pwd) | where true)\nlet z = ($a + $b)\n(1 + 2)\n(ls)\nif (true) { 1 }\nif ($x | is-empty) { 1 }\ndef f [] { ($in | length) }\nlet w = (bar\n    1\n    2\n)\n";
+    assert_eq!(
+        fmt(parens, &default),
+        "let x = ls | length\nlet y = pwd | where true\nlet z = ($a + $b)\n(1 + 2)\n(ls)\nif true { 1 }\nif ($x | is-empty) { 1 }\ndef f [] { $in | length }\nlet w = (bar\n    1\n    2\n)\n"
+    );
+    assert_eq!(fmt(parens, &with(|o| o.strip_redundant_parens = false)), parens);
+
+    // expand_def_bodies
+    assert_eq!(fmt("def f [] { 1 }\ndef g [] { }", &default), "def f [] { 1 }\ndef g [] { }\n");
+    assert_eq!(
+        fmt("def f [] { 1 }\ndef g [] { }", &with(|o| o.expand_def_bodies = true)),
+        "def f [] {\n    1\n}\ndef g [] { }\n"
+    );
+
+    // expand_complex_records
+    assert_eq!(fmt("{a: {b: 1}, c: [x y]}", &default), "{\n    a: {b: 1}\n    c: [x y]\n}\n");
+    assert_eq!(fmt("{a: 1, c: [x y]}", &default), "{a: 1, c: [x y]}\n");
+    assert_eq!(fmt("{a: {b: 1}, c: [x y]}", &with(|o| o.expand_complex_records = false)), "{a: {b: 1}, c: [x y]}\n");
+
+    // compact_simple_closures (and line_length)
+    assert_eq!(fmt("each {|x|\n    $x * 2\n}", &default), "each {|x| $x * 2 }\n");
+    assert_eq!(fmt("each {|x|\n    let y = $x\n}", &default), "each {|x|\n    let y = $x\n}\n");
+    assert_eq!(
+        fmt("each {|x|\n    $x * 2\n}", &with(|o| o.compact_simple_closures = false)),
+        "each {|x|\n    $x * 2\n}\n"
+    );
+    let long = format!("each {{|x|\n    $x + {}\n}}", "1".repeat(80));
+    assert_eq!(fmt(&long, &default), format!("each {{|x|\n    $x + {}\n}}\n", "1".repeat(80)));
+    assert_eq!(fmt(&long, &with(|o| o.line_length = 200)), format!("each {{|x| $x + {} }}\n", "1".repeat(80)));
+
+    // unquote_match_patterns
+    let arms = "match $x {\n    \"allow\" => 1\n    \"true\" => 2\n    \"a-b\" => 3\n    \"_\" => 4\n}\n";
+    assert_eq!(
+        fmt(arms, &default),
+        "match $x {\n    allow => 1\n    \"true\" => 2\n    \"a-b\" => 3\n    \"_\" => 4\n}\n"
+    );
+    assert_eq!(fmt(arms, &with(|o| o.unquote_match_patterns = false)), arms);
+
+    // margin and declaration grouping
+    let items = "echo one\necho two\n\n\necho three\n";
+    assert_eq!(fmt(items, &default), "echo one\necho two\n\necho three\n");
+    assert_eq!(fmt(items, &with(|o| o.margin = Some(1))), "echo one\n\necho two\n\necho three\n");
+    assert_eq!(fmt(items, &with(|o| o.margin = Some(0))), "echo one\necho two\necho three\n");
+    let decls = "let a = 1\n\nlet b = 2\nconst c = 3\nconst d = [\n    1\n    2\n]\nuse x.nu\n\nuse y.nu\n";
+    assert_eq!(
+        fmt(decls, &default),
+        "let a = 1\nlet b = 2\n\nconst c = 3\n\nconst d = [\n    1\n    2\n]\nuse x.nu\nuse y.nu\n"
+    );
+    assert_eq!(
+        fmt("def f [] {\n    let a = 1\n\n    let b = 2\n}", &default),
+        "def f [] {\n    let a = 1\n\n    let b = 2\n}\n"
+    );
+
+    // indent and indent_char
+    assert_eq!(fmt("def f [] {\n1\n}", &with(|o| o.indent = 2)), "def f [] {\n  1\n}\n");
+    assert_eq!(fmt("def f [] {\n1\n}", &with(|o| o.indent_char = IndentChar::Tab)), "def f [] {\n\t1\n}\n");
+}
+
+/// Layout that follows the source: comments in every position, items grouped
+/// per line, tables, and arguments split over lines.
+#[test]
+fn preserves_source_layout() {
+    let fmt = |s: &str| format(s, &Options::default()).unwrap();
+    let same = |s: &str| assert_eq!(fmt(s), s, "{s}");
+    same("match $x {\n    a => 1\n    # between arms\n    b if $y => 2\n}\n");
+    same("let x = [\n    1 # one\n]\n");
+    same("let x = [ # opener\n    1\n    2\n]\n");
+    same("let x = { # opener\n    a: 1\n}\n");
+    same("def f [] { # opener\n    1\n}\n");
+    same("# first\n\n# second\nls\n\n# third\n\nls\n");
+    same("let x = [\n    \"--flag\" value\n    \"--other\" 1\n]\n");
+    same("const t = [\n    [a, b];\n    [1, 2]\n    [3, 4]\n]\n");
+    same("let x = (bar\n    1\n    2\n)\n");
+    same("{|k v| $k }\n");
+    same("def f [a b] { $a }\n");
+    assert_eq!(fmt("[\n    1\n]"), "[1]\n");
+    assert_eq!(fmt("$\"(# not a comment)\""), "$\"(# not a comment)\"\n");
+    assert_eq!(fmt("{a: 1}\n"), "{a: 1}\n");
+    assert_eq!(fmt("use std [a,  b]"), "use std [a, b]\n");
+    assert_eq!(fmt("error  make {msg: 1}"), "error make {msg: 1}\n");
+    assert_eq!(fmt("match $x {\n    {type:  \"user\"} => 1\n}"), "match $x {\n    {type: \"user\"} => 1\n}\n");
+}
+
+/// `if(true){1}else{2}` is one word to Nushell; it is written as an `if`.
+#[test]
+fn repairs_packed_if() {
+    let (out, notes) = format_with_notes("def f [] {\n    if(true){1}else{2}\n}", &Options::default()).unwrap();
+    assert_eq!(out, "def f [] {\n    if true { 1 } else { 2 }\n}\n");
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].offset, 15);
+    let (out, notes) = format_with_notes("iffy(1)", &Options::default()).unwrap();
+    assert_eq!((out.as_str(), notes.len()), ("iffy(1)\n", 0));
 }

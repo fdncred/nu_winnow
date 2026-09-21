@@ -214,7 +214,7 @@ impl LexOptions {
         LexOptions { extra_whitespace: b"\n\r", special: b".?!", skip_comments: true, signature: false };
     /// Options for match blocks: commas, newlines and (see below) pipes separate arms.
     pub const MATCH: LexOptions =
-        LexOptions { extra_whitespace: b" \r\n,", special: &[], skip_comments: true, signature: false };
+        LexOptions { extra_whitespace: b" \r\n,", special: &[], skip_comments: false, signature: false };
     /// Options for the first two tokens of a `{...}` body, used to decide what it is.
     pub const BRACE_PROBE: LexOptions =
         LexOptions { extra_whitespace: b"\r\n\t", special: b":", skip_comments: true, signature: false };

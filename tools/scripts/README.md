@@ -12,9 +12,10 @@ All scripts run with `nu` 0.115.2 and need the example binary built with
   `--commands std_commands.txt` so standard-library commands such as
   `assert equal` resolve as multi-word names, as they do inside nu.
 * `nufmt-fixtures.nu [NUFMT_DIR]` — runs the `nufmt` example over the
-  ground-truth fixtures of a nushell/nufmt checkout (default `~/src/nufmt`)
-  and reports which `tests/fixtures/expected` files it reproduces; `--diff
-  NAME` prints the diff for one fixture. Needs
+  ground-truth fixtures of a nushell/nufmt checkout (default `~/src/nufmt`),
+  passing a fixture's `tests/fixtures/config/<name>.nuon` as `--config` when
+  it exists, and reports which `tests/fixtures/expected` files it reproduces;
+  `--diff NAME` prints the diff for one fixture. Needs
   `cargo build --release --example nufmt`.
 * `gen-std-commands.nu [STD_DIR]` — regenerates `std_commands.txt`, the list
   of standard-library exports both bare and module-prefixed.

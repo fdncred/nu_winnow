@@ -10,15 +10,26 @@ layout it wants and copy everything else through untouched.
 cargo run --release --example nufmt -- file.nu            # print formatted source
 cargo run --release --example nufmt -- --write file.nu    # format in place
 cargo run --release --example nufmt -- --check dir/       # exit 1 if any file would change
+cargo run --release --example nufmt -- --config nufmt.nuon file.nu
 echo 'ls|where size>1kb' | cargo run --release --example nufmt
 ```
 
-The last one prints `ls | where size > 1kb` and, on stderr, a note that
+Layout follows the source unless one of the options in `format::Options`
+says otherwise (`indent`, `indent_char`, `line_length`, `margin`,
+`comment_spacing`, `keep_alignment`, `trim_trailing_whitespace`,
+`indent_pipelines`, `strip_redundant_parens`, `expand_def_bodies`,
+`expand_complex_records`, `compact_simple_closures`,
+`unquote_match_patterns`); the config file is a NUON record with the same
+keys, parsed by this crate. The defaults reproduce most of nufmt's
+ground-truth fixtures (`tools/scripts/nufmt-fixtures.nu` measures this). The
+how-to chapter of the internals documentation describes every option.
+
+The last command prints `ls | where size > 1kb` and, on stderr, a note that
 `size>1kb` was written as a comparison: Nushell lexes on whitespace, so the
 unspaced word is one column name to it, which `where` can never find. This
-is the formatter's only change beyond layout; it is limited to bare words of
-`where` conditions and every occurrence is reported (see `format_with_notes`
-and `Formatter::compact_comparison` in `format.rs`).
+and `if(true){1}else{2}` (one word to Nushell) are the only rewrites beyond
+layout that cannot be switched off; every occurrence is reported (see
+`format_with_notes` in `format.rs`).
 
 ## What "lossless" means here
 

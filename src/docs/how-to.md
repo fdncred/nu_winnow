@@ -74,7 +74,7 @@ CI job.
 ## The `nufmt` example
 
 ```nushell
-nufmt [--write|-w] [--check] [FILE|DIR ...]
+nufmt [--write|-w] [--check] [--config FILE] [FILE|DIR ...]
 ```
 
 | Parameter | Effect |
@@ -84,6 +84,7 @@ nufmt [--write|-w] [--check] [FILE|DIR ...]
 | (no flag) | Print the formatted source to standard output |
 | `--write`, `-w` | Rewrite each file in place |
 | `--check` | Print the names of files that would change and exit with status 1 if there are any |
+| `--config FILE` | Read formatting options from a NUON record (parsed by this crate) |
 
 Things to try:
 
@@ -100,6 +101,10 @@ cargo run --release --example nufmt -- --check tests/corpus
 
 # Format a copy in place.
 cp tests/corpus/std_log.nu /tmp/std_log.nu && cargo run --release --example nufmt -- --write /tmp/std_log.nu
+
+# Keep hand-aligned columns and indent with tabs.
+'{keep_alignment: true, indent_char: tab}' | save -f /tmp/nufmt.nuon
+cargo run --release --example nufmt -- --config /tmp/nufmt.nuon tests/corpus/std_log.nu
 ```
 
 The formatter is an example of a consumer: `examples/nufmt/format.rs` walks
@@ -107,18 +112,48 @@ the tree, copies atoms from their spans, normalises whitespace, re-indents
 blocks and multi-line collections and re-emits comments by position. Its
 `README.md` explains, with runnable examples, how the tree plus the source
 reconstructs a file losslessly. Its tests (`tests/nufmt.rs`) require
-formatting to be idempotent, to keep every comment, and to produce a tree
-equal to the original's.
+formatting to be idempotent, to keep every comment, and (with the
+whitespace-only options) to produce a tree equal to the original's.
 
-One rewrite goes beyond whitespace. Nushell lexes on whitespace, so in
-`where size>1kb` the word `size>1kb` is a single column name, and `where`
-fails at run time with "did you mean 'size'?". That is never what was meant,
-so inside a `where` condition the formatter writes such a word as the
-comparison `size > 1kb` (also for a bare word that is an operand of
-`and`/`or`/`xor`, which Nushell reads as a string and always rejects) and
-reports each rewrite on stderr as `file:line:col: note: ...`. Quoted words,
-words that are not `column<op>value` in shape, and words outside a `where`
-condition are left alone.
+### Options
+
+Layout follows the source unless an option says otherwise: a list, record,
+closure or block written on one line stays on one line and one written over
+several lines keeps one item per line, with items the author put on one line
+(`"--flag" value`) kept together. The options are the fields of
+`format::Options`; the config file uses the same names. The defaults were
+chosen to reproduce the expected output of nufmt's ground-truth fixtures
+(`tools/scripts/nufmt-fixtures.nu` measures this: 111 of 130 as of this
+writing, the rest being invalid inputs, line-length wrapping, or nufmt's own
+inconsistencies).
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `indent` | `4` | Width of one indentation level |
+| `indent_char` | `space` | `space` or `tab` (`indent` is then the tab width used for layout) |
+| `line_length` | `80` | Width the formatter stays within when *it* puts something on one line; long lines the author wrote are never wrapped |
+| `margin` | `null` | Blank lines between top-level items: `null` keeps the source's, an int writes exactly that many. Consecutive `use`s and consecutive `let`/`mut` or `const` declarations are always grouped, and a `let` group and a `const` group always separated |
+| `comment_spacing` | `1` | Spaces between code and a comment on the same line |
+| `keep_alignment` | `false` | Keep runs of two or more spaces between tokens on one line, so hand-aligned `=`, `=>`, values and trailing comments stay aligned |
+| `trim_trailing_whitespace` | `true` | Remove whitespace at the end of comments |
+| `indent_pipelines` | `false` | Indent the `\| cmd` continuation lines of a multi-line pipeline one level deeper than its first line |
+| `strip_redundant_parens` | `true` | Drop `( )` around the whole value of a `let`/assignment, the only statement of a block, or an `if`/`while` condition (`let x = (ls \| length)`, `if (true)`, `((pwd) \| where true)`); parentheses around an operator expression or a top-level statement are kept |
+| `expand_def_bodies` | `false` | Write every non-empty `def` body on its own lines |
+| `expand_complex_records` | `true` | One field per line when a value is a record, closure or block |
+| `compact_simple_closures` | `true` | `{\|x\| $x * 2 }` on one line when the body is a single value expression and fits |
+| `unquote_match_patterns` | `true` | `"allow" => ...` becomes `allow => ...` when the string is a plain identifier |
+
+Two rewrites go beyond layout and are always on; each occurrence is reported
+on stderr as `file:line:col: note: ...`:
+
+* In a `where` condition, a bare word written without spaces around a
+  comparison (`size>1kb`) is a single column name to Nushell, which `where`
+  fails to find ("did you mean 'size'?"). It is written as the comparison
+  `size > 1kb`. The same applies to a bare word that is an operand of
+  `and`/`or`/`xor`. Quoted words and words outside a `where` condition are
+  left alone.
+* `if(true){1}else{2}` is one word to Nushell (an external command that cannot
+  exist). It is written as the `if` it was meant to be.
 
 ## Tests
 
