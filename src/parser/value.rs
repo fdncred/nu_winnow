@@ -95,8 +95,10 @@ fn any_value<'a>(st: St<'_, 'a>, span: Span, text: &'a str) -> PResult<Expr<'a>>
         return Ok(Expr::new(ExprKind::Int(int), span));
     }
     // A radix prefix commits the word to being an int, as in Nushell: `0b2`
-    // is an error, not a bare word.
-    if let Some(radix) = literal::radix_prefix(text) {
+    // is an error, not a bare word (`0x[13]=` is a bare word, though).
+    if let Some(radix) = literal::radix_prefix(text)
+        && !text[2..].starts_with('[')
+    {
         return Err(invalid_literal("int", &format!("invalid digits for radix {radix}"), span));
     }
     if let Some(float) = literal::parse_float(text) {
@@ -122,9 +124,7 @@ pub fn looks_like_value(text: &str) -> bool {
                 || literal::filesize(text).is_some_and(|r| r.is_ok())
                 || literal::duration(text).is_some_and(|r| r.is_ok())
                 || literal::is_datetime(text)
-                || text.starts_with("0x[")
-                || text.starts_with("0o[")
-                || text.starts_with("0b[")
+                || literal::radix_prefix(text).is_some_and(|_| text[2..].starts_with('[') && text.ends_with(']'))
                 || cellpath::is_range_syntax(text)
         }
     }

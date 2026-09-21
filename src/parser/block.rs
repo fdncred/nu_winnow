@@ -177,11 +177,18 @@ fn take_pipe_ahead(st: St<'_, '_>, c: &mut Cursor<'_>, comments: &mut Vec<Commen
 }
 
 /// After a `|`: `a |\n  b`, `a | # comment\n  b` and `a | | b` all continue
-/// the pipeline. Consumes newlines, comments and extra pipes.
-fn skip_pipe_continuation(st: St<'_, '_>, c: &mut Cursor<'_>, pipe: &mut Option<Span>, comments: &mut Vec<Comment>) {
+/// the pipeline. Consumes newlines, comments and extra pipes; returns
+/// whether a newline was crossed.
+fn skip_pipe_continuation(
+    st: St<'_, '_>,
+    c: &mut Cursor<'_>,
+    pipe: &mut Option<Span>,
+    comments: &mut Vec<Comment>,
+) -> bool {
+    let mut newline = false;
     while let Some(tok) = c.peek() {
         match tok.kind {
-            TokenKind::Eol if pipe.is_some() => {}
+            TokenKind::Eol if pipe.is_some() => newline = true,
             TokenKind::Comment if pipe.is_some() => {
                 st.comment(tok.span);
                 comments.push(Comment { span: tok.span });
@@ -191,6 +198,7 @@ fn skip_pipe_continuation(st: St<'_, '_>, c: &mut Cursor<'_>, pipe: &mut Option<
         }
         c.next();
     }
+    newline
 }
 
 /// Parse one pipeline: commands separated by `|`.
@@ -199,14 +207,15 @@ fn pipeline<'a>(st: St<'_, 'a>, c: &mut Cursor<'_>, leading_comments: Vec<Commen
     let mut trailing_comments = Vec::new();
     let mut pipe: Option<Span> = None;
     // A pipeline may start with `|` (`( | str join)`): the empty first command is dropped.
-    skip_pipe_continuation(st, c, &mut pipe, &mut trailing_comments);
+    let mut newline_after_pipe = skip_pipe_continuation(st, c, &mut pipe, &mut trailing_comments);
     loop {
         if let Some(pipe_span) = pipe
             && c.peek().is_none_or(|t| matches!(t.kind, TokenKind::Semicolon | TokenKind::Eol))
         {
-            // nu tolerates a `|` that ends the whole file, but not one that ends a
-            // block, a statement (`let x = 1 | ;`) or anything else.
-            if c.peek().is_none() && st.at_top_level() && c.end_span().start == st.src.len() && !elements.is_empty() {
+            // Like nu's lite parser, a `|` followed by a newline and then the end
+            // of the block is tolerated (`ls |\n`); one that is the last token
+            // (`ls |`, `(ls |\n)`, `let x = 1 |`) is not.
+            if c.peek().is_none() && newline_after_pipe && !elements.is_empty() {
                 break;
             }
             return Err(cut(
@@ -221,7 +230,20 @@ fn pipeline<'a>(st: St<'_, 'a>, c: &mut Cursor<'_>, leading_comments: Vec<Commen
         elements.push(PipelineElement { span: Span::new(start, end), pipe, expr, redirection });
         let Some(next_pipe) = raw.pipe_after.or_else(|| take_pipe_ahead(st, c, &mut trailing_comments)) else { break };
         pipe = Some(next_pipe);
-        skip_pipe_continuation(st, c, &mut pipe, &mut trailing_comments);
+        newline_after_pipe = skip_pipe_continuation(st, c, &mut pipe, &mut trailing_comments);
+    }
+    // Like nu ("statement used in pipeline"): a declaration or a `for` loop
+    // is a statement of its own, never an element of a longer pipeline, and
+    // `source`, `hide`, `overlay` and `plugin use` cannot follow a pipe.
+    if elements.len() > 1
+        && let Some(statement) = elements
+            .iter()
+            .enumerate()
+            .find(|(i, e)| is_statement_only(&e.expr) || (*i > 0 && is_statement_call(st, &e.expr)))
+    {
+        return Err(cut(Diagnostic::message("statement used in pipeline", statement.1.expr.span).with_help(
+            "declarations, `for`, `source`, `hide`, `overlay` and `plugin use` are statements, not pipeline elements",
+        )));
     }
     let span = elements[0].span.merge(elements.last().map_or(elements[0].span, |e| e.span));
     let terminator = match c.peek() {
@@ -232,6 +254,35 @@ fn pipeline<'a>(st: St<'_, 'a>, c: &mut Cursor<'_>, leading_comments: Vec<Commen
         _ => None,
     };
     Ok(Pipeline { span, elements, leading_comments, trailing_comments, terminator })
+}
+
+fn is_statement_only(expr: &Expr<'_>) -> bool {
+    matches!(
+        expr.kind,
+        ExprKind::Def(_)
+            | ExprKind::Extern(_)
+            | ExprKind::Alias(_)
+            | ExprKind::Module(_)
+            | ExprKind::Use(_)
+            | ExprKind::Export(_)
+            | ExprKind::ExportEnv(_)
+            | ExprKind::AttributeBlock(_)
+            | ExprKind::For(_)
+    )
+}
+
+/// Calls nu refuses after a `|` (`HeadKind::Builtin` in its `parse_expression`).
+fn is_statement_call(st: St<'_, '_>, expr: &Expr<'_>) -> bool {
+    let ExprKind::Call(call) = &expr.kind else { return false };
+    let head = st.text(call.head.span);
+    let first_word = head.split_whitespace().next().unwrap_or("");
+    match first_word {
+        "source" | "hide" | "plugin" if head.starts_with("plugin use") || first_word != "plugin" => true,
+        "overlay" => {
+            !head.starts_with("overlay list") && !(call.args.first().is_some_and(|a| st.text(a.span()) == "list"))
+        }
+        _ => false,
+    }
 }
 
 /// Collect the tokens of one command.

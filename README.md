@@ -119,6 +119,16 @@ head is an internal or external command (all bare heads become `Call`; `^cmd`
 becomes `ExternalCall`; `%cmd` is a `Call` with a `sigil` and `%$cmd` a
 `DynamicCall`). An evaluator applies its signatures on top.
 
+## Verification
+
+`nu tools/scripts/verify.nu` runs every check against Nushell and prints a
+scoreboard: the test-suite (877 fixture snippets with golden trees, tables
+mirroring nu-parser's own tests, every built-in command's examples), a
+traceability matrix from every `SyntaxShape`, keyword, `FlatShape` and
+`ParseError` of nu-parser to a fixture and a test (`src/docs/11-traceability.md`),
+and differential parsing of every corpus and their mutations with nu-parser
+itself. See [`TESTING.md`](TESTING.md).
+
 ## Design
 
 The grammar of Nushell is whitespace-sensitive: `1+1` is a bare word while
@@ -251,8 +261,20 @@ Deeply nested brackets recurse on the stack, one frame per nesting level, as
 
 ## Testing
 
+[`TESTING.md`](TESTING.md) is the runbook: every test layer with the command
+that runs it, the verification ladder against Nushell, how to read a
+disagreement and how to add coverage. In brief:
+
 * `tests/syntax.rs` — construct-by-construct assertions on the AST for every
   feature of the language, including error cases.
+* `tests/fixtures/` — one snippet per file for every construct in every
+  spelling, accepted or rejected, each pinned to a golden tree or error
+  (`tests/fixtures.rs`).
+* `tests/language.rs` — tables mirroring nu-parser's own tests: values,
+  spans, token streams, precedence, error messages.
+* `tests/examples.rs` — every built-in command's examples parse.
+* `tests/traceability.rs` — every `SyntaxShape`, keyword, `FlatShape` and
+  `ParseError` of nu-parser is mapped in `src/docs/11-traceability.md`.
 * `tests/corpus.rs` — parses the real-world files in `tests/corpus/`
   (standard library modules, default config, completion modules, prompts) and
   optionally every `.nu` file under `NU_WINNOW_CORPUS`.
@@ -269,7 +291,8 @@ Deeply nested brackets recurse on the stack, one frame per nesting level, as
   `nu_winnow_parser::docs`.
 * Unit tests in each module (lexer, literals, flatten, spans, errors).
 
-Run everything with `cargo test`; run the benchmarks with `cargo bench`.
+Run everything with `cargo test`; run the comparison with Nushell itself
+with `nu tools/scripts/verify.nu`; run the benchmarks with `cargo bench`.
 
 ## License
 

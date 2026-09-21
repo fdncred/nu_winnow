@@ -157,12 +157,17 @@ on stderr as `file:line:col: note: ...`:
 
 ## Tests
 
+`TESTING.md` at the repository root is the runbook for all of this; the
+commands are repeated here for completeness.
+
 ```nushell
 cargo test                              # everything, default features
 cargo test --all-features               # also the serde derives
 cargo test --test syntax                # one construct per test, with error cases
 cargo test --test fixtures              # every snippet in tests/fixtures, against its golden tree or error
 cargo test --test language              # value/shape tables mirroring Nushell's own parser tests
+cargo test --test examples              # every built-in command's examples (tests/corpus/snippets) parse
+cargo test --test traceability          # chapter 11 maps every nu-parser construct (needs ../nushell for the upstream check)
 cargo test --test corpus                # every file in tests/corpus must parse cleanly
 cargo test --test nufmt                 # formatter idempotency and structure preservation
 cargo test --doc                        # the `rust` blocks in src/docs and the README
@@ -191,6 +196,61 @@ The usual hygiene before a change is finished:
 cargo fmt
 cargo clippy --all-targets --all-features
 cargo test --all-features
+```
+
+## The verification ladder
+
+Everything that compares this parser with Nushell, in one command:
+
+```nushell
+nu tools/scripts/verify.nu                       # build, run every rung, print the scoreboard
+nu tools/scripts/verify.nu --no-build --quick    # reuse binaries, skip nu_scripts, the book and mutants
+nu tools/scripts/verify.nu --save tools/scripts/verify-history.nuon
+```
+
+| Rung | What it compares | Good means |
+| --- | --- | --- |
+| `cargo test --all-features` | unit, syntax, fixtures (with golden trees), language tables, command examples, corpus, traceability, nufmt | 0 failures |
+| `fixtures-compare.nu` | every fixture through ours, `nu-check` and nu-parser | 0 rows where `ours != expected` |
+| `differential` originals | nu-parser vs ours over fixtures, corpora, nu-std, the Nushell repository's `.nu` files, nu_scripts, 1,700 command examples, 1,000 book blocks | 0 `ours_rejects`, 0 `nu_syntax_rejects`, 0 panics |
+| `differential` mutants | the same inputs, each mutated 3 times | as few residual disagreements as possible, 0 panics |
+| `nucheck-compare.nu` | `nu-check` vs ours over nu_scripts and nu-std | 0 files nu accepts that we reject |
+| `flatcmp.nu` | nu's `ast --flatten` vs ours over nu-std | only the documented differences |
+| `nufmt-fixtures.nu` | the formatter vs the nushell/nufmt reference fixtures | 111 of 130 |
+
+Scoreboard on 2026-09-21 against Nushell `af4001096` (main) and `nu` 0.115.2
+(`tools/scripts/verify-history.nuon` keeps the record): 1,348 tests, 0
+failures; 882 fixtures, 0 with `ours != expected` (9 where `nu-check`
+rejects for semantic reasons); differential originals 5,378 compared, 0
+`ours_rejects`, 0 `nu_syntax_rejects`, 287 semantic, 0 panics; mutants
+16,134 compared, 5 `ours_rejects`, 5 `nu_syntax_rejects`, 39 known, 0
+panics; nucheck-compare 1,599 files, 0 accepted by nu and rejected here;
+flatcmp 125 differing runs over nu-std (the documented signature-dependent
+ones); nufmt reference fixtures 111 of 130.
+
+When a number moves, `differential --details` and `fixtures-compare
+--details` say which input and why. When Nushell adds syntax, the
+traceability test names the unmapped construct.
+
+### `extract-corpus.nu` and `differential`
+
+```nushell
+nu tools/scripts/extract-corpus.nu [--nushell DIR] [--book DIR] [--out DIR]
+cd tools/nushell-harness
+cargo run --release --bin differential -- [--details] [--json] [--mutants N] [--seed S] [--no-std] [--snippets FILE.json]... [FILE|DIR ...]
+```
+
+`extract-corpus.nu` regenerates `tests/corpus/snippets/*.json` from the
+checkouts (default `~/src/nushell` and `~/src/nushell.github.io`).
+`differential` parses every file and snippet with both parsers in process;
+its summary columns are explained in chapter 09, and `--details` prints each
+disagreement with nu-parser's and this parser's message. It exits 1 when
+`ours_rejects`, `nu_syntax_rejects` or `panics` is non-zero.
+
+```nushell
+cd tools/nushell-harness
+cargo run --release --bin differential -- ../../tests/fixtures ../../tests/corpus --mutants 5 --details
+cargo run --release --bin differential -- --snippets ../../tests/corpus/snippets/nu-command-examples.json
 ```
 
 ## Benchmarks

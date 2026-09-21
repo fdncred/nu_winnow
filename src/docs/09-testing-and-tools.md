@@ -2,7 +2,9 @@
 
 The parser's correctness claim is "accepts and structures programs exactly
 like nu-parser". Several layers of tests back that claim; know which one to
-extend for a given change.
+extend for a given change. This chapter explains the layers; the commands
+that run them, in order, are in [`TESTING.md`](../../TESTING.md) at the
+repository root.
 
 ## Unit tests inside modules
 
@@ -60,6 +62,24 @@ counts around pipes, lexer token spans and delimiter errors. Where nu's tree
 differs by design (an unknown head is a `Call`, a backtick word is unquoted
 in an external call) the table says so.
 
+## `tests/examples.rs`: every built-in command's examples
+
+`tools/scripts/extract-corpus.nu` pulls the `Example { example: ".." }`
+literals out of the command crates of a Nushell checkout into
+`tests/corpus/snippets/nu-command-examples.json` (about 1,700 snippets, the
+official usage of every command) and the code blocks of the book into
+`book.json`. The test parses every command example and requires zero
+diagnostics. Regenerate both files when the checkout moves.
+
+## `tests/traceability.rs`: nu-parser's grammar, item by item
+
+Chapter 11 maps every `SyntaxShape`, `FlatShape`, `TokenContents` and
+`ParseError` variant, every keyword command and every `pub fn parse_*` of
+nu-parser to the code, fixtures and tests here. The test checks that every
+fixture pattern and test name in those tables exists and, with a Nushell
+checkout, that every upstream item is mapped, so a construct added to
+Nushell fails this test until it has a row, a fixture and a test.
+
 ## `tests/corpus.rs`: real files
 
 `tests/corpus/` holds standard-library modules, the default config files,
@@ -75,6 +95,33 @@ Formatting every corpus file must be idempotent, keep every comment, and
 produce a tree whose `pretty::dump` (spans removed) equals the original's.
 This catches parser regressions from a different angle: a construct that
 parses but whose spans are wrong will format into something different.
+
+## Differential testing at scale (`tools/nushell-harness`, `differential`)
+
+`differential` links nu-parser from the checkout and this crate into one
+binary and parses the same text with both: every fixture, corpus file,
+`nu-std` module, the Nushell repository's own `.nu` test files, `nu_scripts`,
+the command examples and the book. nu-parser's errors are classified as
+syntactic (delimiters, keywords, literals, operators: this parser must agree)
+or semantic (declarations, signatures, types, files: it cannot), and the
+summary counts `ours_rejects`, `nu_syntax_rejects`, `nu_semantic_rejects`,
+`known` (the documented tolerances of nu this parser does not copy) and
+`panics`. With `--mutants N` every input is also mutated N times (a token
+deleted, duplicated or swapped, a delimiter inserted, a character dropped,
+the text truncated) and both parsers must still agree, which is how the
+edge rules of chapter 04 were found. `--details` prints each disagreement
+with both messages. The exit status gates a check-in.
+
+## The verification ladder (`tools/scripts/verify.nu`)
+
+One command runs every rung above and prints a scoreboard: `cargo test`,
+`fixtures-compare`, `differential` (with mutants), `nucheck-compare` over
+`nu_scripts` and `nu-std`, `flatcmp` over `nu-std` and `nufmt-fixtures`.
+`--save FILE` appends the scoreboard with the date and the Nushell commit to
+a NUON history, so that "closer to 100%" is a number that can be watched
+over time. `--quick` skips the slow corpora. Run it before a check-in and
+whenever the Nushell checkout moves; see `how-to.md` for the numbers as of
+this writing.
 
 ## Comparing with Nushell itself (`tools/scripts/`, Nushell scripts)
 

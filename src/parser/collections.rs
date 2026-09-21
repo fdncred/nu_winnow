@@ -1,7 +1,7 @@
 //! Lists, tables and records.
 
 use crate::ast::{Expr, ExprKind, InterpPart, ListItem, Quote, RecordItem, StringLit, Table};
-use crate::error::Diagnostic;
+use crate::error::{Diagnostic, ErrorKind};
 use crate::input::{PResult, cut};
 use crate::lexer::{LexOptions, Token, TokenKind, lex_prefix_at};
 use crate::span::Span;
@@ -26,9 +26,14 @@ pub fn list_or_table<'a>(st: St<'_, 'a>, span: Span) -> PResult<Expr<'a>> {
     {
         return table(st, span, first, rows);
     }
+    // Nushell tolerates `|` and `;` between list items, but not a `|` at the end.
+    if let Some(last) = items.last()
+        && matches!(last.kind, TokenKind::Pipe | TokenKind::PipePipe)
+    {
+        return Err(cut(Diagnostic::new(ErrorKind::UnexpectedEof("list item after `|`"), last.span)));
+    }
     let mut out = Vec::with_capacity(items.len());
     for tok in &items {
-        // Nushell tolerates `|` and `;` between list items.
         if !matches!(tok.kind, TokenKind::Semicolon | TokenKind::Pipe | TokenKind::PipePipe) {
             out.push(list_item(st, tok)?);
         }

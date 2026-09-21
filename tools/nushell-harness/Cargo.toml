@@ -15,8 +15,11 @@ nu-protocol = { path = "/Users/fdncred/src/nushell/crates/nu-protocol" }
 nu-engine = { path = "/Users/fdncred/src/nushell/crates/nu-engine" }
 nu-cmd-lang = { path = "/Users/fdncred/src/nushell/crates/nu-cmd-lang" }
 nu-command = { path = "/Users/fdncred/src/nushell/crates/nu-command" }
+nu-cmd-extra = { path = "/Users/fdncred/src/nushell/crates/nu-cmd-extra" }
 nu-std = { path = "/Users/fdncred/src/nushell/crates/nu-std" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [[bin]]
 name = "bench-vs-nu-parser"
@@ -29,5 +32,9 @@ path = "src/bin/bridge.rs"
 [[bin]]
 name = "nu-parser-check"
 path = "src/bin/check.rs"
+
+[[bin]]
+name = "differential"
+path = "src/bin/differential.rs"
 
 [workspace]

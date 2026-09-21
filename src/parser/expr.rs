@@ -371,12 +371,11 @@ pub fn parse_args<'a>(st: St<'_, 'a>, mut c: Cursor<'_>) -> PResult<Vec<Arg<'a>>
 fn external_call<'a>(st: St<'_, 'a>, first: Token, mut c: Cursor<'_>) -> PResult<Expr<'a>> {
     let caret = Span::new(first.span.start, first.span.start + 1);
     let head_span = Span::new(first.span.start + 1, first.span.end);
-    if head_span.is_empty() {
-        return Err(cut(Diagnostic::expected("command name after `^`", head_span)));
-    }
-    let head = match st.text(head_span).as_bytes()[0] {
-        b'$' | b'(' => value::value(st, head_span, Hint::Any)?,
-        _ => external_string(st, head_span)?,
+    // `^` alone parses in nu (and fails at run time), so the head may be empty.
+    let head = match st.text(head_span).as_bytes().first() {
+        Some(b'$' | b'(') => value::value(st, head_span, Hint::Any)?,
+        Some(_) => external_string(st, head_span)?,
+        None => Expr::new(ExprKind::String(StringLit::bare("")), head_span),
     };
     let mut args = Vec::with_capacity(c.rest().len());
     let mut end = first.span;

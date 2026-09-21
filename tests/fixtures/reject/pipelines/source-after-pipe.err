@@ -1,0 +1,6 @@
+error: statement used in pipeline
+  --> reject/pipelines/source-after-pipe.nu:1:6
+  |
+1 | ls | source x.nu
+  |      ^^^^^^^^^^^
+  = help: declarations, `for`, `source`, `hide`, `overlay` and `plugin use` are statements, not pipeline elements

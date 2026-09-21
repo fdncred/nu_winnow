@@ -1,0 +1,6 @@
+error: unexpected end of input, expected command after `|`
+  --> reject/pipelines/trailing-pipe-without-newline.nu:1:4
+  |
+1 | ls |
+  |    ^
+  = while parsing pipeline

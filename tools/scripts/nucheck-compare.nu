@@ -8,16 +8,20 @@
 #   nu tools/scripts/nucheck-compare.nu --details ~/src/nu_scripts | where {|r| $r.accepted_by_nu and not $r.accepted_by_ours }
 
 # Record, for each file, whether `nu-check` and nu-winnow-parser accept it.
-def main [
+export def main [
     --parse: path      # the `parse` example binary (default: target/release/examples/parse)
     --details          # return the full table instead of printing a summary
     ...dirs: path      # directories to search
 ]: nothing -> any {
-    let parse = $parse | default ($env.FILE_PWD | path join ../../target/release/examples/parse | path expand)
+    let parse = if $parse != null {
+        $parse
+    } else {
+        $env.FILE_PWD | path join ../../target/release/examples/parse | path expand
+    }
     let files = $dirs | each {|d| glob ($d | path join '**/*.nu') } | flatten | sort
     let rows = $files | each {|f|
         {
-            accepted_by_nu: (nu-check $f)
+            accepted_by_nu: (open --raw $f | nu-check)
             accepted_by_ours: ((^$parse --check --quiet $f | complete | get exit_code) == 0)
             file: $f
         }

@@ -63,7 +63,7 @@ fn parse_params<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Vec<Param<'a>>>
                 }
                 continue;
             }
-            TokenKind::Pipe | TokenKind::PipePipe => continue,
+            TokenKind::Pipe | TokenKind::PipePipe | TokenKind::Semicolon => continue,
             TokenKind::Item | TokenKind::Assign(_) => {}
             _ => return Err(cut(Diagnostic::expected("parameter", tok.span))),
         }
@@ -126,24 +126,26 @@ fn parse_params<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Vec<Param<'a>>>
                     mode = Mode::Arg;
                 }
                 Mode::Type => {
-                    let (ty, completer) = parse_type_with_completer(st, tok.span)?;
                     // `[: int]`: nu silently drops a type with no parameter before it.
-                    let Some(p) = params.last_mut() else {
+                    if params.is_empty() {
                         mode = Mode::AfterType;
                         continue;
-                    };
+                    }
+                    let (ty, completer) = parse_type_with_completer(st, tok.span)?;
+                    let Some(p) = params.last_mut() else { unreachable!("checked above") };
                     p.ty = Some(ty);
                     p.completer = completer;
                     p.span = p.span.merge(tok.span);
                     mode = Mode::AfterType;
                 }
                 Mode::Default => {
-                    let default = value::value(st, tok.span, Hint::Any)?;
                     // `[= 1]`: nu silently drops a default with no parameter before it.
-                    let Some(p) = params.last_mut() else {
+                    if params.is_empty() {
                         mode = Mode::Arg;
                         continue;
-                    };
+                    }
+                    let default = value::value(st, tok.span, Hint::Any)?;
+                    let Some(p) = params.last_mut() else { unreachable!("checked above") };
                     p.default = Some(default);
                     p.span = p.span.merge(tok.span);
                     mode = Mode::Arg;

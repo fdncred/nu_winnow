@@ -1,0 +1,6 @@
+error: statement used in pipeline
+  --> reject/pipelines/def-in-pipeline.nu:1:1
+  |
+1 | def f [] { } | length
+  | ^^^^^^^^^^^^
+  = help: declarations, `for`, `source`, `hide`, `overlay` and `plugin use` are statements, not pipeline elements

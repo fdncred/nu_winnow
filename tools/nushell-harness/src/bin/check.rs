@@ -17,7 +17,8 @@ use nu_protocol::engine::{EngineState, StateWorkingSet};
 
 fn engine(std: bool) -> EngineState {
     let engine_state = nu_cmd_lang::create_default_context();
-    let mut engine_state = nu_command::add_shell_command_context(engine_state);
+    let engine_state = nu_command::add_shell_command_context(engine_state);
+    let mut engine_state = nu_cmd_extra::add_extra_command_context(engine_state);
     // `$nu` must exist before the standard library is parsed, as in the `nu` binary.
     engine_state.generate_nu_constant();
     if std && let Err(e) = nu_std::load_standard_library(&mut engine_state) {

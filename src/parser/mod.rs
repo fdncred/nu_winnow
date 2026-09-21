@@ -217,11 +217,6 @@ impl<'s, 'a> St<'s, 'a> {
         }
     }
 
-    /// `true` outside every block, closure and subexpression.
-    pub fn at_top_level(&self) -> bool {
-        self.shared.borrow().decl_scopes.len() == 1
-    }
-
     /// Enter a declaration scope.
     pub fn push_scope(&self) {
         self.shared.borrow_mut().decl_scopes.push(CommandSet::default());

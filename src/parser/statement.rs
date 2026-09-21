@@ -19,7 +19,7 @@ use super::block::RawCommand;
 use super::cursor::Cursor;
 use super::signature::{self, definition_name};
 use super::value::{self, Hint};
-use super::{St, block, cellpath, collections, expr, pattern, strings};
+use super::{St, block, cellpath, collections, expr, literal, pattern, strings};
 
 /// Keywords that start a statement and can only appear at the head of a
 /// pipeline (they parse their own `=` and `{}` arguments).
@@ -62,7 +62,9 @@ pub fn is_parser_keyword(name: &str) -> bool {
     )
 }
 
-/// Reject a `def`/`extern`/`alias` name that is a parser keyword.
+/// Reject a `def`/`extern`/`alias` name that is a parser keyword, or that
+/// nu refuses because it could never be called: one containing `#`, `^` or
+/// `%`, or one that reads as a number or a filesize (`def 1kb`).
 fn check_definition_name(name: &Spanned<Cow<'_, str>>, what: &str) -> PResult<()> {
     if is_parser_keyword(&name.item) {
         return Err(cut(Diagnostic::message(
@@ -70,6 +72,15 @@ fn check_definition_name(name: &Spanned<Cow<'_, str>>, what: &str) -> PResult<()
             name.span,
         )
         .with_help("choose a different name; this word is parsed specially by Nushell")));
+    }
+    let text: &str = &name.item;
+    if text.contains(['#', '^', '%'])
+        || literal::parse_int(text).is_some()
+        || literal::parse_float(text).is_some()
+        || literal::filesize(text).is_some_and(|f| f.is_ok())
+    {
+        return Err(cut(Diagnostic::message(format!("{what} name not supported"), name.span)
+            .with_help("a name may not contain `#`, `^` or `%`, or read as a number or filesize")));
     }
     Ok(())
 }
@@ -212,6 +223,23 @@ fn block_item<'a>(st: St<'_, 'a>, tok: &Token, what: &'static str) -> PResult<Bl
 fn def_stmt<'a>(st: St<'_, 'a>, mut c: Cursor<'_>) -> PResult<Expr<'a>> {
     let kw = c.expect_item("def")?;
     let mut flags = Vec::new();
+    def_flags(st, &mut c, &mut flags)?;
+    let name = definition_name(st, c.expect_item("command name")?.span)?;
+    check_definition_name(&name, "command")?;
+    // nu also accepts the flags after the name: `def foo --env [] { }`.
+    def_flags(st, &mut c, &mut flags)?;
+    let (mut signature, has_colon) = signature_item(st, &mut c)?;
+    let Some((body_tok, type_items)) = c.rest().split_last() else {
+        return Err(cut(Diagnostic::expected("block", c.end_span())));
+    };
+    io_types(st, &mut signature, type_items, has_colon)?;
+    let body = block_item(st, body_tok, "block")?;
+    let span = kw.span.merge(body_tok.span);
+    Ok(Expr::new(ExprKind::Def(Def { flags, name, signature, body }), span))
+}
+
+/// `--env` / `--wrapped` items at the cursor.
+fn def_flags(st: St<'_, '_>, c: &mut Cursor<'_>, flags: &mut Vec<Spanned<DefFlag>>) -> PResult<()> {
     while let Some(tok) = c.peek().filter(|t| t.kind == TokenKind::Item && st.tok(t).starts_with("--")) {
         let flag = match st.tok(tok) {
             "--env" => DefFlag::Env,
@@ -224,16 +252,7 @@ fn def_stmt<'a>(st: St<'_, 'a>, mut c: Cursor<'_>) -> PResult<Expr<'a>> {
         flags.push(Spanned::new(flag, tok.span));
         c.next();
     }
-    let name = definition_name(st, c.expect_item("command name")?.span)?;
-    check_definition_name(&name, "command")?;
-    let (mut signature, has_colon) = signature_item(st, &mut c)?;
-    let Some((body_tok, type_items)) = c.rest().split_last() else {
-        return Err(cut(Diagnostic::expected("block", c.end_span())));
-    };
-    io_types(st, &mut signature, type_items, has_colon)?;
-    let body = block_item(st, body_tok, "block")?;
-    let span = kw.span.merge(body_tok.span);
-    Ok(Expr::new(ExprKind::Def(Def { flags, name, signature, body }), span))
+    Ok(())
 }
 
 /// The `[...]`/`(...)` signature item, returning whether it ended with `:`.
@@ -408,6 +427,11 @@ fn alias_stmt<'a>(st: St<'_, 'a>, mut c: Cursor<'_>) -> PResult<Expr<'a>> {
         true => expr::parse_call(st, cursor)?,
         false => expr::parse_expression(st, cursor)?,
     };
+    // Like nu ("can't create alias to expression"), only a command can be aliased.
+    if !matches!(value.kind, ExprKind::Call(_) | ExprKind::ExternalCall(_) | ExprKind::DynamicCall(_)) {
+        return Err(cut(Diagnostic::message("cannot create an alias to an expression", value.span)
+            .with_help("an alias names a command and its arguments, such as `alias ll = ls -l`")));
+    }
     let span = kw.span.merge(value.span);
     Ok(Expr::new(ExprKind::Alias(Alias { name, eq: eq_tok.span, value: Box::new(value) }), span))
 }
@@ -424,12 +448,39 @@ fn module_stmt<'a>(st: St<'_, 'a>, mut c: Cursor<'_>) -> PResult<Expr<'a>> {
             st.push_scope();
             let body = value::block_body(st, tok.span);
             st.pop_scope();
-            Some(body?)
+            let body = body?;
+            // Like nu, a module body holds declarations only.
+            for pipeline in &body.pipelines {
+                let first = &pipeline.elements[0].expr;
+                if !is_module_item(first) {
+                    return Err(cut(Diagnostic::new(
+                        ErrorKind::ExpectedKeyword("def, const, extern, alias, use, module, export or export-env"),
+                        first.span,
+                    )
+                    .with_help("a module body can only declare things; put code in `export-env` or a `def`")));
+                }
+            }
+            Some(body)
         }
         _ => None,
     };
     c.expect_end()?;
     Ok(Expr::new(ExprKind::Module(Module { name: Box::new(name), body }), kw.span.merge(end)))
+}
+
+fn is_module_item(expr: &Expr<'_>) -> bool {
+    match &expr.kind {
+        ExprKind::Def(_)
+        | ExprKind::Extern(_)
+        | ExprKind::Alias(_)
+        | ExprKind::Use(_)
+        | ExprKind::Module(_)
+        | ExprKind::Export(_)
+        | ExprKind::ExportEnv(_)
+        | ExprKind::Const(_) => true,
+        ExprKind::AttributeBlock(a) => is_module_item(&a.item),
+        _ => false,
+    }
 }
 
 fn use_stmt<'a>(st: St<'_, 'a>, mut c: Cursor<'_>) -> PResult<Expr<'a>> {
@@ -467,10 +518,12 @@ fn use_member_list<'a>(st: St<'_, 'a>, span: Span) -> PResult<Vec<Spanned<Cow<'a
     let ExprKind::List(items) = collections::list_or_table(st, span)?.kind else {
         return Err(cut(Diagnostic::expected("list of names", span)));
     };
+    // nu takes any item's text as a name (`use std [1 2]` parses and fails later).
     items
         .into_iter()
         .map(|item| match item {
             ListItem::Item(Expr { span, kind: ExprKind::String(s) }) => Ok(Spanned::new(s.value, span)),
+            ListItem::Item(other) => Ok(Spanned::new(Cow::Borrowed(st.text(other.span)), other.span)),
             other => Err(cut(Diagnostic::expected("name", other.span()))),
         })
         .collect()

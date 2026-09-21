@@ -198,6 +198,8 @@ pub fn is_datetime(text: &str) -> bool {
 pub fn binary<'a>(st: St<'_, 'a>, span: Span) -> Option<PResult<Expr<'a>>> {
     let text = st.text(span);
     let (radix, digits_per_byte, prefix) = match text.as_bytes() {
+        // Only a bracketed literal that closes is a binary; `0x[13]=` is a bare word in nu.
+        [.., last] if *last != b']' => return None,
         [b'0', b'x', b'[', ..] => (16, 2, "0x["),
         [b'0', b'o', b'[', ..] => (8, 3, "0o["),
         [b'0', b'b', b'[', ..] => (2, 8, "0b["),

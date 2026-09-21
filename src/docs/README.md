@@ -16,7 +16,9 @@ the files involved and shows the code shapes you will meet there.
 | [06 Values and literals](06-values-and-literals.md) | Turning one item into an expression: `$`, `(`, `{`, `[`, literals, strings, interpolation, cell paths, ranges, collections, closures | `src/parser/value.rs`, `src/parser/strings.rs`, `src/parser/cellpath.rs`, `src/parser/collections.rs`, `src/parser/literal.rs` |
 | [07 Signatures, types and patterns](07-signatures-types-and-patterns.md) | Parameter lists, type annotations, input/output types, `match` patterns | `src/parser/signature.rs`, `src/parser/pattern.rs` |
 | [08 The AST and its consumers](08-ast-and-consumers.md) | Node catalogue, spans, comments, the visitor, `flatten`, `pretty` | `src/ast/`, `src/flatten.rs`, `src/pretty.rs` |
-| [09 Testing and tools](09-testing-and-tools.md) | Unit and integration tests, the corpus, comparison scripts, benchmarks, the engine harness | `tests/`, `tools/` |
+| [09 Testing and tools](09-testing-and-tools.md) | Unit and integration tests, the fixtures, the corpora, differential testing, comparison scripts, benchmarks, the engine harness | `tests/`, `tools/` |
+| [11 Traceability](11-traceability.md) | Every construct of nu-parser mapped to the code, fixtures and tests here; checked by `tests/traceability.rs` | `tests/`, `src/` |
+| [TESTING.md](../../TESTING.md) | The runbook: how to run every test and the verification ladder, how to read a disagreement, how to add coverage | `tests/`, `tools/scripts/` |
 | [10 Contributing](10-contributing.md) | Step-by-step recipes for the common changes, debugging, pitfalls | everywhere |
 | [How to use the tools](how-to.md) | Every command-line tool in the repository with its flags and examples: the `parse` example, `nufmt`, the engine `bridge`, the benchmarks, the comparison scripts, tests and features | `examples/`, `tools/`, `tests/` |
 | [nufmt README](../../examples/nufmt/README.md) | Why the tree plus the source is lossless, with runnable examples of reconstructing, rewriting and formatting source | `examples/nufmt/` |
