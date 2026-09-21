@@ -1,11 +1,15 @@
 # nushell-harness: comparing with, and plugging into, Nushell
 
 This crate is not part of the library. It links the real `nu-parser`,
-`nu-engine` and command crates (by path, from a local Nushell checkout; see
-`Cargo.toml`) to answer two questions:
+`nu-engine` and command crates from the `main` branch of
+<https://github.com/nushell/nushell> (`cargo update` here moves to the
+newest commit; the commented `[patch]` block in `Cargo.toml` switches to a
+checkout next to this repository) to answer three questions:
 
 1. How fast is `nu-winnow-parser` compared to `nu-parser` on the same files?
-2. How would the new parser plug into the Nushell engine?
+2. Where do the two parsers disagree (`nu-parser-check`, `differential`; see
+   `TESTING.md` at the repository root)?
+3. How would the new parser plug into the Nushell engine?
 
 ## `bench-vs-nu-parser`
 
@@ -19,8 +23,8 @@ Both parsers are given the same bytes. `nu-parser` runs on a fresh
 binary parses a script. Setup is outside the timed region; parsing (which for
 `nu-parser` includes declaration resolution and type checking) is inside.
 
-Results on an Apple Silicon laptop, release builds. `nu-parser` 0.115.2 is the
-local checkout (`../nushell-harness`); 0.115.1 is the crates.io release, built by
+Results on an Apple Silicon laptop, release builds. `nu-parser` 0.115.2 is
+nushell's `main` at the time; 0.115.1 is the crates.io release, built by
 `../nushell-harness-release` from the same harness source:
 
 | Corpus | Files | Bytes | `nu-parser` 0.115.1 | `nu-parser` 0.115.2 | `nu-winnow-parser` | Ratio vs 0.115.1 | Ratio vs 0.115.2 |

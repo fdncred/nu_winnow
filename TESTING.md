@@ -20,13 +20,18 @@ external tools. `verify.nu` needs the checkouts listed below.
 | Need | Default location | Used by |
 | --- | --- | --- |
 | `nu` 0.115 on `PATH` | | every script in `tools/scripts/` |
-| Nushell source checkout | `~/src/nushell` (also `../nushell` for the traceability test) | `tools/nushell-harness` (links `nu-parser` by path), `extract-corpus.nu`, traceability |
+| Nushell source checkout | `~/src/nushell` (also `../nushell` for the traceability test) | `extract-corpus.nu`, traceability, the corpora `verify.nu` reads (`crates/nu-std`, `tests`) |
+| network, for the first harness build | | `tools/nushell-harness` fetches `nu-parser` from nushell's `main` on GitHub; `cargo update` there moves to the newest commit, or uncomment its `[patch]` block to use the checkout next to this repository |
 | nushell.github.io checkout | `~/src/nushell.github.io` | `extract-corpus.nu` (the book's code blocks) |
 | nu_scripts checkout | `~/src/nu_scripts` | `verify.nu`, `nucheck-compare.nu`, `differential` |
 | nushell/nufmt checkout | `~/src/nufmt` | `nufmt-fixtures.nu` |
 
-The harness paths are in `tools/nushell-harness/Cargo.toml`; the first build
-takes several minutes because it compiles Nushell.
+The first harness build takes several minutes because it compiles Nushell.
+All defaults can be overridden with flags (`--nushell`, `--nu-scripts`,
+`--book`, the `nufmt_dir` argument) or environment variables; nothing in the repository
+assumes a particular home directory. Note that the harness's nu-parser (from
+GitHub) and the checkout the traceability test reads can be at different
+commits; `verify.nu --save` records both.
 
 ## `cargo test`, layer by layer
 

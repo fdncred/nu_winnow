@@ -115,7 +115,14 @@ export def main [
 
     if $save != null {
         let history = if ($save | path exists) { open $save } else { [] }
-        $history | append {date: (date now | format date '%Y-%m-%d %H:%M'), nushell: (git -C $nushell rev-parse --short HEAD | str trim), rows: $rows} | to nuon | save -f $save
+        # The checkout the corpora and the traceability test come from, and the commit the harness was built against.
+        let checkout = git -C $nushell rev-parse --short HEAD | complete | get stdout | str trim
+        let harness_commit = open --raw ($harness | path join Cargo.lock)
+            | parse -r 'name = "nu-parser"\s*\nversion = "[^"]*"\s*\nsource = "git\+[^#]*#(?P<sha>[0-9a-f]+)"'
+            | get -o 0.sha
+            | default "?"
+            | str substring 0..9
+        $history | append {date: (date now | format date '%Y-%m-%d %H:%M'), nushell: $checkout, harness_nushell: $harness_commit, rows: $rows} | to nuon | save -f $save
     }
     $rows
 }

@@ -284,9 +284,10 @@ cp target/release/examples/parse /tmp/parse-before
 
 ### Against `nu-parser` (`tools/nushell-harness`)
 
-This crate links the real Nushell crates by path from a checkout at
-`../../../nushell` (see its `Cargo.toml`); the first build takes several
-minutes.
+This crate links the real Nushell crates from the `main` branch on GitHub
+(see its `Cargo.toml`: `cargo update` in that directory moves to the newest
+commit, and a commented `[patch]` block switches to a checkout next to this
+repository); the first build takes several minutes.
 
 ```nushell
 cd tools/nushell-harness
@@ -373,7 +374,7 @@ nu tools/scripts/fixtures-compare.nu [--details] [--parse BIN] [--check BIN] [--
 
 Runs every file in `tests/fixtures/` through three front ends and reports
 the disagreements: `ours` (`parse --check`), `nu` (`nu-check` in the `nu`
-on `PATH`) and `main` (`nu-parser` from the local Nushell checkout via
+on `PATH`) and `main` (`nu-parser` from nushell's `main` branch via
 `tools/nushell-harness`'s `nu-parser-check`, with its first error message;
 `null` when that binary is not built). The expected verdict is the
 fixture's directory, `accept` or `reject`. `--details` returns the whole

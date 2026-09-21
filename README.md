@@ -282,8 +282,8 @@ disagreement and how to add coverage. In brief:
   example over the corpus. `examples/nufmt/README.md` shows, with runnable
   examples, how a formatter reconstructs source losslessly from the tree.
 
-* `tools/nushell-harness` — benchmark against `nu-parser` and the engine bridge
-  (requires a local Nushell checkout; see its README);
+* `tools/nushell-harness` — benchmark, differential tests and the engine
+  bridge against `nu-parser` from nushell's `main` branch (see its README);
   `tools/nushell-harness-release` builds the benchmark against the crates.io
   release for cross-version tables.
 * `src/docs/` — how the parser works, chapter by chapter, a how-to for every

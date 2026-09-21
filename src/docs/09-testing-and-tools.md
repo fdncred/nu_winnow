@@ -154,8 +154,9 @@ Run these after any change to the lexer or to `value.rs`; they take seconds.
   crate on the same files, with `nu-parser` given the full command set.
   `tools/nushell-harness-release` builds the same harness against the
   crates.io release so two Nushell versions can be compared. Both link real
-  Nushell crates (path dependencies to a checkout, crates.io respectively),
-  so they are separate cargo packages and take minutes to build.
+  Nushell crates (git dependencies on nushell's `main`, crates.io
+  respectively), so they are separate cargo packages and take minutes to
+  build.
 
 ## The engine bridge
 

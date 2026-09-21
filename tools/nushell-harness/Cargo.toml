@@ -3,20 +3,25 @@ name = "nushell-harness"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "Benchmark against nu-parser and an engine bridge, built against a local Nushell checkout"
+description = "Benchmark, differential tests and an engine bridge, built against nu-parser from nushell's main branch"
 
-# These point at a local Nushell checkout so that the comparison uses exactly
-# the parser behind the `nu` binary used for verification. Replace the paths
-# with `version = "0.115"` to build against crates.io.
+# The real Nushell crates, from the `main` branch on GitHub, so that the
+# comparison always uses the latest nu-parser. `cargo update` in this
+# directory moves to the newest commit; the commit in use is recorded in
+# Cargo.lock (and by `tools/scripts/verify.nu --save`).
+#
+# To build against a local checkout instead, for example the sibling
+# `../../../nushell` that the traceability test and `extract-corpus.nu` read,
+# uncomment the `[patch]` block at the end of this file.
 [dependencies]
 nu-winnow-parser = { path = "../.." }
-nu-parser = { path = "/Users/fdncred/src/nushell/crates/nu-parser" }
-nu-protocol = { path = "/Users/fdncred/src/nushell/crates/nu-protocol" }
-nu-engine = { path = "/Users/fdncred/src/nushell/crates/nu-engine" }
-nu-cmd-lang = { path = "/Users/fdncred/src/nushell/crates/nu-cmd-lang" }
-nu-command = { path = "/Users/fdncred/src/nushell/crates/nu-command" }
-nu-cmd-extra = { path = "/Users/fdncred/src/nushell/crates/nu-cmd-extra" }
-nu-std = { path = "/Users/fdncred/src/nushell/crates/nu-std" }
+nu-parser = { git = "https://github.com/nushell/nushell", branch = "main" }
+nu-protocol = { git = "https://github.com/nushell/nushell", branch = "main" }
+nu-engine = { git = "https://github.com/nushell/nushell", branch = "main" }
+nu-cmd-lang = { git = "https://github.com/nushell/nushell", branch = "main" }
+nu-command = { git = "https://github.com/nushell/nushell", branch = "main" }
+nu-cmd-extra = { git = "https://github.com/nushell/nushell", branch = "main" }
+nu-std = { git = "https://github.com/nushell/nushell", branch = "main" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -38,3 +43,13 @@ name = "differential"
 path = "src/bin/differential.rs"
 
 [workspace]
+
+# Uncomment to use a checkout next to this repository instead of GitHub.
+# [patch."https://github.com/nushell/nushell"]
+# nu-parser = { path = "../../../nushell/crates/nu-parser" }
+# nu-protocol = { path = "../../../nushell/crates/nu-protocol" }
+# nu-engine = { path = "../../../nushell/crates/nu-engine" }
+# nu-cmd-lang = { path = "../../../nushell/crates/nu-cmd-lang" }
+# nu-command = { path = "../../../nushell/crates/nu-command" }
+# nu-cmd-extra = { path = "../../../nushell/crates/nu-cmd-extra" }
+# nu-std = { path = "../../../nushell/crates/nu-std" }
