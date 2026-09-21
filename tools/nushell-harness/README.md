@@ -1,4 +1,4 @@
-# nu-compat: comparing with, and plugging into, Nushell
+# nushell-harness: comparing with, and plugging into, Nushell
 
 This crate is not part of the library. It links the real `nu-parser`,
 `nu-engine` and command crates (by path, from a local Nushell checkout; see
@@ -11,7 +11,7 @@ This crate is not part of the library. It links the real `nu-parser`,
 
 ```text
 cargo run --release --bin bench-vs-nu-parser -- [--iters N] [--std] FILE|DIR ...
-(cd ../nu-compat-prev && cargo run --release -- [--iters N] FILE|DIR ...)   # nu-parser 0.115.1
+(cd ../nushell-harness-release && cargo run --release -- [--iters N] FILE|DIR ...)   # nu-parser 0.115.1
 ```
 
 Both parsers are given the same bytes. `nu-parser` runs on a fresh
@@ -20,8 +20,8 @@ binary parses a script. Setup is outside the timed region; parsing (which for
 `nu-parser` includes declaration resolution and type checking) is inside.
 
 Results on an Apple Silicon laptop, release builds. `nu-parser` 0.115.2 is the
-local checkout (`../nu-compat`); 0.115.1 is the crates.io release, built by
-`../nu-compat-prev` from the same harness source:
+local checkout (`../nushell-harness`); 0.115.1 is the crates.io release, built by
+`../nushell-harness-release` from the same harness source:
 
 | Corpus | Files | Bytes | `nu-parser` 0.115.1 | `nu-parser` 0.115.2 | `nu-winnow-parser` | Ratio vs 0.115.1 | Ratio vs 0.115.2 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |

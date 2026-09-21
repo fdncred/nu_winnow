@@ -1,9 +1,9 @@
 [package]
-name = "nu-compat"
+name = "nushell-harness"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "Benchmarks and an engine bridge comparing nu-winnow-parser with nu-parser"
+description = "Benchmark against nu-parser and an engine bridge, built against a local Nushell checkout"
 
 # These point at a local Nushell checkout so that the comparison uses exactly
 # the parser behind the `nu` binary used for verification. Replace the paths

@@ -1,9 +1,9 @@
 [package]
-name = "nu-compat-prev"
+name = "nushell-harness-release"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "The nu-parser benchmark built against the previous Nushell release from crates.io"
+description = "The nu-parser benchmark built against the released nu-parser on crates.io, for cross-version comparison"
 
 [dependencies]
 nu-winnow-parser = { path = "../.." }
