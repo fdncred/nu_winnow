@@ -104,8 +104,10 @@ cp tests/corpus/std_log.nu /tmp/std_log.nu && cargo run --release --example nufm
 The formatter is an example of a consumer: `examples/nufmt/format.rs` walks
 the tree, copies atoms from their spans, normalises whitespace, re-indents
 blocks and multi-line collections and re-emits comments by position. Its
-tests (`tests/nufmt.rs`) require formatting to be idempotent, to keep every
-comment, and to produce a tree equal to the original's.
+`README.md` explains, with runnable examples, how the tree plus the source
+reconstructs a file losslessly. Its tests (`tests/nufmt.rs`) require
+formatting to be idempotent, to keep every comment, and to produce a tree
+equal to the original's.
 
 ## Tests
 

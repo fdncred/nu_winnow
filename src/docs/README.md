@@ -19,6 +19,7 @@ the files involved and shows the code shapes you will meet there.
 | [09 Testing and tools](09-testing-and-tools.md) | Unit and integration tests, the corpus, comparison scripts, benchmarks, the engine harness | `tests/`, `tools/` |
 | [10 Contributing](10-contributing.md) | Step-by-step recipes for the common changes, debugging, pitfalls | everywhere |
 | [How to use the tools](how-to.md) | Every command-line tool in the repository with its flags and examples: the `parse` example, `nufmt`, the engine `bridge`, the benchmarks, the comparison scripts, tests and features | `examples/`, `tools/`, `tests/` |
+| [nufmt README](../../examples/nufmt/README.md) | Why the tree plus the source is lossless, with runnable examples of reconstructing, rewriting and formatting source | `examples/nufmt/` |
 | [Nushell integration plan](nushell-integration-plan.md) | How to port this parser into the Nushell code base without breaking users | — |
 
 Conventions used in the chapters:

@@ -256,7 +256,9 @@ Deeply nested brackets recurse on the stack, one frame per nesting level, as
   (standard library modules, default config, completion modules, prompts) and
   optionally every `.nu` file under `NU_WINNOW_CORPUS`.
 * `tests/nufmt.rs` — idempotency and re-parse equivalence of the formatter
-  example over the corpus.
+  example over the corpus. `examples/nufmt/README.md` shows, with runnable
+  examples, how a formatter reconstructs source losslessly from the tree.
+
 * `tools/nushell-harness` — benchmark against `nu-parser` and the engine bridge
   (requires a local Nushell checkout; see its README);
   `tools/nushell-harness-release` builds the benchmark against the crates.io
