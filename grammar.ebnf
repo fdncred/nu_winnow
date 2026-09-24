@@ -119,7 +119,7 @@ bashism = "o>|" | "out>|" | "&&" | "2>" | "2>&1" ;
 item = item_part, { item_part } ;
 item_part = plain_byte | quoted_run | interp_quoted_run | raw_string | bracketed_run ;
 (* An item runs until, at bracket depth zero, a terminator byte is met: " " "\t"
-   "\n" "\r" "|" ";" or any byte in the construct’s additional whitespace or
+   "\n" "\r" "|" ";" or any byte in the construct's additional whitespace or
    special tokens (1.4). Quotes and brackets suspend termination. An empty item is
    UnexpectedEof("command"). A special byte at the START of an item is an item of
    its own (":" in record keys, "." in cell paths).
@@ -144,7 +144,7 @@ dq_byte = "\", ? any byte ? | ? byte except "\"" and "\\" ? ;
 interp_quoted_run = ? "$" ( "\"" | "'" ) ... the same quote ? ;
 (* When the byte before the opening quote (within the item) is "$", an unescaped "("
    inside the string opens a subexpression; from there quotes and parens nest via
-   interp_subexpr_step until the matching ")", and the string’s own quote cannot
+   interp_subexpr_step until the matching ")", and the string's own quote cannot
    close it. Backtick strings never interpolate. An unclosed "(" is Unclosed(")").
    nu: lex.rs:127 interp_subexpr_step, 417-426, 655
    here: src/lexer.rs::scan_item (`quote_is_interp`, `interp_level`), interp_subexpr_step *)
@@ -176,7 +176,7 @@ block_tokens = { separator }, [ pipeline, { separator, { separator }, pipeline }
 separator = eol | semicolon | comment_line ;
 comment_line = comment, eol ;
 (* Comment lines directly above a command (no blank line between) are its leading
-   comments (a def’s documentation); a blank line clears them. A comment after a
+   comments (a def's documentation); a blank line clears them. A comment after a
    token on the same line is a trailing comment. Empty pipelines are dropped.
    nu: lite_parser.rs:219 lite_parse, 466-487; parse_pipelines.rs:129 parse_block
    here: src/parser/block.rs::parse_block *)
@@ -246,7 +246,7 @@ attribute_line = "@", item_rest, { item | pipe | pipe_pipe | redirection_op | as
 (* An item starting with "@" enters attribute mode ONLY when the previous token is
    Eol or ";" (i.e. at the start of a pipeline); `echo 1 | @foo` is a call to `@foo`.
    Inside an attribute line every token up to the Eol/";" is part of the attribute:
-   pipes and redirections are NOT lite errors, they reach the attribute’s argument
+   pipes and redirections are NOT lite errors, they reach the attribute's argument
    parser as words. The definition must start on the very next line or after the
    ";": a blank line or a comment line between attributes and definition closes the
    command and the attributes then lack a definition (6.8).
@@ -445,9 +445,9 @@ long_flag = "--", flag_name, [ "=", value ]
 
 short_flags = "-", char, { char } ;
 (* each char must be a known short flag; only the LAST may take a value. `-1` /
-   `-1.5` / `-.5` is a negative number instead when the current positional’s shape
+   `-1.5` / `-.5` is a negative number instead when the current positional's shape
    is Int/Number/Float (or a OneOf containing one); for any other shape it is
-   "doesn’t have flag -1" (so `echo -1` and `return -1` are errors in nu).
+   "doesn't have flag -1" (so `echo -1` and `return -1` are errors in nu).
    nu: parse_calls.rs:571 parse_short_flags, shape_allows_negative_number
    here: src/parser/expr.rs::parse_args (`-<digit>`, `-.<digit>` always a
    positional number, `-..` a range; consumer) *)
@@ -541,7 +541,7 @@ float = float_text ;  (* after deleting every "_" *)
 float_text = [ "+" | "-" ], ( digit, { digit }, [ ".", { digit } ] | ".", digit, { digit } ),
              [ ( "e" | "E" ), [ "+" | "-" ], digit, { digit } ]
              | [ "+" | "-" ], ( "inf" | "infinity" | "nan" ) ;  (* case-insensitive *)
-(* exactly what Rust’s f64::from_str accepts
+(* exactly what Rust's f64::from_str accepts
    nu: parse_literals.rs:198 parse_float, 210 parse_number
    here: src/parser/literal.rs::parse_float, number *)
 
@@ -571,7 +571,7 @@ date = 4 * digit, "-", 2 * digit, "-", 2 * digit ;  (* item >= 6 bytes, byte 4 i
 time_sep = "T" | "t" ;
 time = 2 * digit, ":", 2 * digit, ":", 2 * digit, [ ".", digit, { digit } ] ;
 offset = "Z" | "z" | ( "+" | "-" ), 2 * digit, ":", 2 * digit ;
-(* Validity is chrono’s parse_from_rfc3339: month 1-12, day valid for that month and
+(* Validity is chrono's parse_from_rfc3339: month 1-12, day valid for that month and
    year (2023-02-30 is a string), hour < 24, minute < 60, second <= 60, offset
    hours < 24; seconds are mandatory; "+0530" (no colon) is not an offset. Anything
    that fails is a plain string.
@@ -766,7 +766,7 @@ spread = "...", ( "[", list_body, "]" | variable, [ cell_path_tail ] | "(", bloc
    ; DIFF 1, 2 (";" and "||" skipped), DIFF 33 (`o>` kept) *)
 
 table = "[", list, ";", list, { list_sep, list }, "]" ;
-(* The item is a table iff its body’s first token starts with "[" and its second is
+(* The item is a table iff its body's first token starts with "[" and its second is
    ";". Then: no row after ";" is "expected table row"; every row token must start
    with "[" (a second ";" is an error); no spreads in header or rows; each row must
    have exactly as many items as the header (MissingColumns / ExtraColumns); every
@@ -850,7 +850,7 @@ const = "const", var_decl, "=", rhs_pipeline ;
 rhs_pipeline = ? <assignment-tail> body parsed as <block-tokens> ? ;
 (* (2) everything to
    the end of the line *)
-(* `let x` without a value is allowed (initial_value is optional in let’s signature);
+(* `let x` without a value is allowed (initial_value is optional in let's signature);
    `mut x` and `const x` are MissingPositional. A redirection or "|" in the rhs is
    part of the rhs pipeline. Type checks and const-evaluability: semantic.
    nu: parse_bindings.rs:20 parse_let, 298 parse_mut, 148 parse_const;
@@ -998,7 +998,7 @@ arm_sep = whitespace | "," | eol | "|" | comment ;
 match_arm = pattern, { "|", pattern }, [ "if", math_expression ], "=>", arm_body ;
 arm_body = block | expression_of_one_item ;  (* OneOf(Block, Expression) *)
 (* the guard is every token between "if" and the next "=>"; the body is exactly ONE
-   item (`=> ls -l` makes `-l` the next arm’s pattern); `{a: 1}` and `{|x| ..}` bodies
+   item (`=> ls -l` makes `-l` the next arm's pattern); `{a: 1}` and `{|x| ..}` bodies
    parse (record / closure); a scrutinee bare word is a string. "|" between arms is
    whitespace to the lexer (so `1 => 2 | 3 => 4` fails only type checking).
    nu: parse_expressions.rs:472 parse_match_block_expression; nu-cmd-lang match_.rs
@@ -1018,7 +1018,7 @@ return = "return", [ value ] ;
 break = "break" ;
 continue = "continue" ;
 (* `return` takes ONE item of shape Any (`return 1 2`, `return 1 + 1` are extra
-   positionals; `return -1` is "doesn’t have flag -1"); break/continue take nothing
+   positionals; `return -1` is "doesn't have flag -1"); break/continue take nothing
    nu: nu-cmd-lang return_.rs, break_.rs, continue_.rs
    here: src/parser/statement.rs::return_stmt, simple_stmt (`return -1`: consumer) *)
 
@@ -1087,7 +1087,7 @@ decl_name = [ "$" ], identifier_byte, { identifier_byte } ;  (* digits, "?", ":"
 param_type = shape, [ "@", completer ] ;
 (* split at the FIRST "@" in the token regardless of "<" ">" nesting; an empty shape
    before "@" is UnknownType; "bool" on a flag is "Type annotations are not allowed
-   for boolean switches"; a rest param’s type becomes list<shape>
+   for boolean switches"; a rest param's type becomes list<shape>
    nu: parse_signatures.rs:984
    here: src/parser/signature.rs::parse_type_with_completer (splits outside "<>";
    empty shape -> any) ; DIFF 36, 39 *)
@@ -1098,7 +1098,7 @@ completer = value ;
    here: consumer (kept as the raw text after "@") *)
 default = value ;
 (* parsed with the DECLARED shape (`x: int = abc` is a parse error), then const-evaluated;
-   an untyped flag with a default takes the default’s type
+   an untyped flag with a default takes the default's type
    nu: parse_signatures.rs:1085
    here: src/parser/signature.rs::parse_params via value(Hint::Any); consumer *)
 description_comment = comment ;
@@ -1247,7 +1247,7 @@ digit_8 = digit_2 | "2" | "3" | "4" | "5" | "6" | "7" ;
 digit_10 = digit ;
 digit_16 = digit | "a" | "b" | "c" | "d" | "e" | "f" | "A" | "B" | "C" | "D" | "E" | "F" ;
 hex = digit_16 ;
-radix_digit = digit_2 | digit_8 | digit_16 ;  (* the digits of the literal’s own radix *)
+radix_digit = digit_2 | digit_8 | digit_16 ;  (* the digits of the literal's own radix *)
 char = ? one UTF-8 encoded character ? ;
 short_char = char ;  (* for <short-flag-param> it must also be an <identifier-byte> *)
 any_chars = { ? any byte ? } ;
