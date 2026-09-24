@@ -294,6 +294,19 @@ disagreement and how to add coverage. In brief:
 Run everything with `cargo test`; run the comparison with Nushell itself
 with `nu tools/scripts/verify.nu`; run the benchmarks with `cargo bench`.
 
+## Grammar Railroad Diagram
+
+I used this tool to generate the grammar.html from grammar.ebnf
+```sh
+ebnf2railroad --title "Nushell Grammar" grammar.ebnf -o grammar.html
+```
+or to just lint the ebnf
+```sh
+ebnf2railroad --lint grammar.ebnf --no-target
+```
+
+https://github.com/matthijsgroen/ebnf2railroad
+
 ## License
 
 MIT, like Nushell. The command-name table and the corpus files are derived
