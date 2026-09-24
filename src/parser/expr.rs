@@ -7,7 +7,7 @@ use std::borrow::Cow;
 
 use crate::ast::{
     Arg, Assignment, BinaryOp, Call, CallHead, DynamicCall, EnvAssignment, EnvShorthand, Expr, ExprKind, ExternalArg,
-    ExternalCall, Flag, InterpPart, Interpolation, Operator, Quote, StringLit, UnaryNot,
+    ExternalCall, Flag, InterpPart, Interpolation, Operator, Quote, RecordItem, StringLit, UnaryNot,
 };
 use crate::error::{Diagnostic, ErrorKind};
 use crate::input::{PResult, cut};
@@ -18,22 +18,40 @@ use super::cursor::Cursor;
 use super::value::{self, Hint, is_spread, looks_like_value};
 use super::{St, block, cellpath, literal, statement, strings};
 
+/// Where a command sits, which decides how its head is read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Position {
+    /// The only command of its pipeline: statement keywords (`def`, `let`,
+    /// `use`, ...) are statements (nu's `parse_builtin_commands`).
+    Statement,
+    /// One element of a longer pipeline, the left side of an assignment, an
+    /// `else` or match-arm expression: nu's `parse_expression`, where a
+    /// declaration is an error.
+    Element,
+}
+
 /// Parse one pipeline element's items.
 ///
-/// Handles, in this order: statement keywords, `NAME=value` environment
-/// shorthand, assignments, math expressions (when the first item looks like a
-/// value), and finally keyword expressions and calls.
-pub fn parse_expression<'a>(st: St<'_, 'a>, mut c: Cursor<'_>) -> PResult<Expr<'a>> {
+/// Handles, in this order: statement keywords (in statement position),
+/// `NAME=value` environment shorthand, assignments, math expressions (when the
+/// first item looks like a value), and finally keyword expressions and calls.
+pub fn parse_expression<'a>(st: St<'_, 'a>, mut c: Cursor<'_>, position: Position) -> PResult<Expr<'a>> {
     let Some(first) = c.peek() else {
         return Err(cut(Diagnostic::expected("command", c.end_span())));
     };
-    if first.kind == TokenKind::Item && statement::is_statement_keyword(st.tok(first)) {
+    if position == Position::Statement && first.kind == TokenKind::Item && statement::is_statement_keyword(st.tok(first))
+    {
         return statement::keyword_or_call(st, c);
     }
     let vars = env_shorthand_prefix(st, &mut c)?;
     let Some(first) = c.peek() else {
-        return Err(cut(Diagnostic::expected("command after environment shorthand", c.end_span())));
+        return Err(cut(Diagnostic::message("unknown command", c.all()[0].span)
+            .with_help("`NAME=value` sets an environment variable for the command that follows it")));
     };
+    // After environment shorthand nu reads the head like any pipeline element.
+    if first.kind == TokenKind::Item && (!vars.is_empty() || position == Position::Element) {
+        check_element_head(st, &c)?;
+    }
     let inner = if c.rest().iter().any(|t| matches!(t.kind, TokenKind::Assign(_))) {
         assignment(st, c.remaining())?
     } else if first.kind != TokenKind::Item {
@@ -50,6 +68,30 @@ pub fn parse_expression<'a>(st: St<'_, 'a>, mut c: Cursor<'_>) -> PResult<Expr<'
             Ok(Expr::new(ExprKind::EnvShorthand(EnvShorthand { vars, expr: Box::new(inner) }), span))
         }
     }
+}
+
+/// The heads nu refuses in `parse_expression`, i.e. after a `|` or after
+/// environment shorthand: declarations and the module/source commands
+/// (`BuiltinCommandInPipeline`), `const`/`mut` (`AssignInPipeline`),
+/// `overlay` unless the second item of the command is `list`, and `plugin`
+/// when the second item is `use`. `c` is positioned at the head; its items
+/// include any shorthand before it, as nu's `spans` do.
+fn check_element_head(st: St<'_, '_>, c: &Cursor<'_>) -> PResult<()> {
+    let Some(head) = c.peek() else { return Ok(()) };
+    let text = st.tok(head);
+    let second = c.all().get(1).map(|t| st.tok(t));
+    let statement = match text {
+        "def" | "extern" | "for" | "module" | "use" | "source" | "alias" | "export" | "export-env" | "hide" => true,
+        "const" | "mut" => true,
+        "overlay" => second != Some("list"),
+        "plugin" => second == Some("use"),
+        _ => false,
+    };
+    if statement {
+        return Err(cut(Diagnostic::new(ErrorKind::KeywordInPipeline(text.to_string()), head.span)
+            .with_help("declarations and the module, source, overlay and plugin commands are statements of their own")));
+    }
+    Ok(())
 }
 
 fn is_env_var_name(name: &str) -> bool {
@@ -89,21 +131,40 @@ fn assignment<'a>(st: St<'_, 'a>, c: Cursor<'_>) -> PResult<Expr<'a>> {
     if op_idx == 0 {
         return Err(cut(Diagnostic::expected("left hand side of assignment", op_tok.span)));
     }
-    let lhs = parse_expression(st, c.slice(0..op_idx))?;
-    // nu accepts a subexpression head too (`(1) = 2`) and fails at run time.
-    match &lhs.kind {
-        ExprKind::Var(_) | ExprKind::Subexpression(_) => {}
-        ExprKind::FullCellPath(p) if matches!(p.head.kind, ExprKind::Var(_) | ExprKind::Subexpression(_)) => {}
-        _ => {
-            return Err(cut(Diagnostic::message("assignment requires a variable", lhs.span)
-                .with_help("only variables (`$x`) and their cell paths (`$x.a`, `$env.FOO`) can be assigned to")));
-        }
+    let lhs = parse_expression(st, c.slice(0..op_idx), Position::Element)?;
+    // nu accepts anything its `parse_full_cell_path` produces as the left side:
+    // a variable, a subexpression, a list or a `key: value` record, with or
+    // without a cell path (`(1) = 2`, `[1].0 = 2`), and fails at run time.
+    let assignable = match &lhs.kind {
+        ExprKind::Var(_) | ExprKind::Subexpression(_) | ExprKind::FullCellPath(_) => true,
+        ExprKind::List(_) | ExprKind::Table(_) => true,
+        ExprKind::Record(items) => matches!(items.first(), Some(RecordItem::Pair { .. })),
+        _ => false,
+    };
+    if !assignable {
+        return Err(cut(Diagnostic::message("assignment requires a variable", lhs.span)
+            .with_help("only variables (`$x`) and their cell paths (`$x.a`, `$env.FOO`) can be assigned to")));
     }
     let rhs = c.slice(op_idx + 1..items.len());
     let Some(rhs_span) = rhs.span() else {
         return Err(cut(Diagnostic::expected("right hand side of assignment", op_tok.span.past())));
     };
     let rhs = block::parse_block(st, rhs, rhs_span);
+    // Since 0.97 nu refuses an external command as the start of the value
+    // unless it is written with a caret: `$x = git` is an error, `$x = ^git`
+    // is not. Needs the command table; decided only when one is configured.
+    if let Some(first) = rhs.pipelines.first().and_then(|p| p.elements.first())
+        && let ExprKind::Call(call) = &first.expr.kind
+        && call.sigil.is_none()
+        && st.is_builtin_command(&call.head.name) == Some(false)
+        && !st.is_known_command(&call.head.name)
+    {
+        return Err(cut(Diagnostic::message("external command calls must be explicit in assignments", call.head.span)
+            .with_help(format!(
+                "`{}` is not a known command; write `^{}` to run it and capture its output, or quote the string",
+                call.head.name, call.head.name
+            ))));
+    }
     let span = lhs.span.merge(rhs_span);
     Ok(Expr::new(ExprKind::Assignment(Assignment { lhs: Box::new(lhs), op: Spanned::new(op, op_tok.span), rhs }), span))
 }
@@ -232,7 +293,13 @@ fn operand<'a>(st: St<'_, 'a>, c: &mut Cursor<'_>) -> PResult<Expr<'a>> {
 const MAX_COMMAND_WORDS: usize = 5;
 
 /// Parse a call: a (possibly multi-word) command name followed by arguments.
-pub fn parse_call<'a>(st: St<'_, 'a>, mut c: Cursor<'_>) -> PResult<Expr<'a>> {
+pub fn parse_call<'a>(st: St<'_, 'a>, c: Cursor<'_>) -> PResult<Expr<'a>> {
+    parse_call_with(st, c, false)
+}
+
+/// [`parse_call`]; with `lenient` set (an alias target) a keyword command
+/// may miss positionals.
+pub fn parse_call_with<'a>(st: St<'_, 'a>, mut c: Cursor<'_>, lenient: bool) -> PResult<Expr<'a>> {
     let first = c.expect_item("command")?;
     match st.tok(&first).as_bytes()[0] {
         b'^' => return external_call(st, first, c),
@@ -242,7 +309,23 @@ pub fn parse_call<'a>(st: St<'_, 'a>, mut c: Cursor<'_>) -> PResult<Expr<'a>> {
     let head = resolve_head(st, first, &mut c, "");
     let args = parse_args(st, c)?;
     let span = first.span.merge(args.last().map_or(head.span, Arg::span));
-    Ok(Expr::new(ExprKind::Call(Call { head, args, sigil: None }), span))
+    let call = Call { head, args, sigil: None };
+    statement::check_fixed_signature(st, &call, lenient)?;
+    // An unknown bare head is an external command for nu, whose `[` arguments
+    // go through the list parser alone (`cmd [a].0` is unclosed, `echo [a].0`
+    // is a cell path). Needs the command table; decided only when one is
+    // configured, like the assignment rule.
+    if st.is_builtin_command(&call.head.name) == Some(false) && !st.is_known_command(&call.head.name) {
+        for arg in &call.args {
+            let value_span = match arg {
+                Arg::Positional(expr) => expr.span,
+                Arg::Spread { expr, .. } => expr.span,
+                _ => continue,
+            };
+            check_external_list(st, value_span)?;
+        }
+    }
+    Ok(Expr::new(ExprKind::Call(call), span))
 }
 
 const PERCENT_HELP: &str =
@@ -385,10 +468,9 @@ fn external_call<'a>(st: St<'_, 'a>, first: Token, mut c: Cursor<'_>) -> PResult
         let text = st.tok(&tok);
         args.push(if is_spread(text, b"[$(") {
             let dots = Span::new(tok.span.start, tok.span.start + 3);
-            ExternalArg::Spread {
-                dots,
-                expr: value::value(st, Span::new(tok.span.start + 3, tok.span.end), Hint::Any)?,
-            }
+            let value_span = Span::new(tok.span.start + 3, tok.span.end);
+            check_external_list(st, value_span)?;
+            ExternalArg::Spread { dots, expr: value::value(st, value_span, Hint::Any)? }
         } else {
             ExternalArg::Regular(external_arg(st, tok.span)?)
         });
@@ -401,9 +483,27 @@ fn external_call<'a>(st: St<'_, 'a>, first: Token, mut c: Cursor<'_>) -> PResult
 /// everything else is an external string.
 pub fn external_arg<'a>(st: St<'_, 'a>, span: Span) -> PResult<Expr<'a>> {
     match st.text(span).as_bytes()[0] {
-        b'$' | b'(' | b'[' | b'{' => value::value(st, span, Hint::Any),
+        b'[' => {
+            check_external_list(st, span)?;
+            value::value(st, span, Hint::Any)
+        }
+        b'$' | b'(' | b'{' => value::value(st, span, Hint::Any),
         _ => external_string(st, span),
     }
+}
+
+/// A `[`-argument of an external command is handed to nu's list parser as
+/// it is, which needs the item to END with `]`: `^cmd [a].x` and
+/// `^cmd ...[a].x` are "unclosed delimiter", while `[a]` and `(ls).name`
+/// parse (`parse_regular_external_arg`, `parse_list_expression`).
+fn check_external_list(st: St<'_, '_>, span: Span) -> PResult<()> {
+    let text = st.text(span);
+    if text.starts_with('[') && !text.ends_with(']') {
+        let open = Span::new(span.start, span.start + 1);
+        return Err(cut(Diagnostic::new(ErrorKind::Unclosed { delimiter: "]", open }, span.past())
+            .with_help("an external command's list argument must end with `]`; a cell path after it is not allowed")));
+    }
+    Ok(())
 }
 
 /// The segments of a word passed to an external command.

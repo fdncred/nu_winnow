@@ -4,3 +4,4 @@ error: unexpected end of input, expected command after `|`
 1 | do { ls | }
   |         ^
   = while parsing pipeline
+  = help: the pipeline has no end: add a command after the `|` or remove it

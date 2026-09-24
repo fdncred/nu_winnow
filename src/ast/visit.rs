@@ -216,11 +216,25 @@ pub fn walk_expr<'a, V: Visitor<'a> + ?Sized>(v: &mut V, expr: &Expr<'a>) {
         }
         ExprKind::Def(d) => {
             v.visit_signature(&d.signature);
+            if let Some(p) = &d.body_params {
+                v.visit_signature(p);
+            }
             v.visit_block(&d.body);
         }
         ExprKind::Extern(e) => v.visit_signature(&e.signature),
-        ExprKind::Alias(a) => v.visit_expr(&a.value),
-        ExprKind::Use(u) => v.visit_expr(&u.module),
+        ExprKind::Alias(a) => {
+            if let Some(v_) = &a.value {
+                v.visit_expr(v_);
+            }
+        }
+        ExprKind::Use(u) => {
+            v.visit_expr(&u.module);
+            for m in &u.members {
+                if let UseMemberKind::Ignored(e) = &m.kind {
+                    v.visit_expr(e);
+                }
+            }
+        }
         ExprKind::Module(m) => {
             v.visit_expr(&m.name);
             if let Some(b) = &m.body {
@@ -244,6 +258,9 @@ pub fn walk_expr<'a, V: Visitor<'a> + ?Sized>(v: &mut V, expr: &Expr<'a>) {
                     v.visit_expr(g);
                 }
                 v.visit_expr(&arm.body);
+            }
+            if let Some(b) = &m.value_block {
+                v.visit_expr(b);
             }
         }
         ExprKind::For(f) => {
@@ -306,7 +323,7 @@ pub fn walk_param<'a, V: Visitor<'a> + ?Sized>(v: &mut V, param: &Param<'a>) {
     if let Some(d) = &param.default {
         v.visit_expr(d);
     }
-    if let Some(c) = &param.description {
+    for c in &param.description {
         v.visit_comment(c);
     }
 }

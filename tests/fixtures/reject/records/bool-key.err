@@ -3,4 +3,4 @@ error: expected string
   |
 1 | {true: 4}
   |  ^^^^
-  = help: `true` is a value; quote it to use it as a record key
+  = help: `true` is a value; quote it to use it as a string

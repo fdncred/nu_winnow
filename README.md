@@ -19,7 +19,12 @@ engine and as the foundation of a formatter such as
   Nushell's standard library parses; the parser's accept/reject verdicts agree
   with `nu-check` on all 1,599 files except those `nu-check` rejects for
   semantic reasons (missing modules, type mismatches, signature-dependent
-  argument counts).
+  argument counts). `grammar/grammar.md` is a BNF of the language as
+  `nu-parser` accepts it, derived from nu-parser's source rule by rule and
+  annotated with where this crate implements each rule; every syntactic
+  disagreement it found has been closed and pinned as a fixture, so the two
+  parsers accept and reject the same text (section 9 of that file lists what
+  remains for a consumer with signatures, declarations or files).
 * **Fast.** Roughly 30–45 MB/s per file and 40 MB/s over a 7 MB corpus of
   real scripts in release mode (single-threaded, including file I/O), with
   zero-copy borrowing of identifiers, bare words and unescaped string bodies.
@@ -117,17 +122,26 @@ takes the following argument as its value (`--flag value` is a `Flag` followed
 by a `Positional`; `--flag=value` carries its value), and whether an unknown
 head is an internal or external command (all bare heads become `Call`; `^cmd`
 becomes `ExternalCall`; `%cmd` is a `Call` with a `sigil` and `%$cmd` a
-`DynamicCall`). An evaluator applies its signatures on top.
+`DynamicCall`). An evaluator applies its signatures on top. The commands that
+are keywords for nu-parser (`hide`, `source`, `source-env`, `run`, `overlay *`,
+`plugin use`, the built-in attributes) have fixed signatures, so their flags,
+positional counts and `--help`/`--` boundaries are checked here as nu does.
+Text that nu-parser accepts and then never looks at (a redirection inside a
+list, a second brace after a `def` signature, an `extern` default, a consumed
+`--`) is parsed the same way and reported in `Ast::ignored` so a consumer can
+see it.
 
 ## Verification
 
 `nu tools/scripts/verify.nu` runs every check against Nushell and prints a
-scoreboard: the test-suite (877 fixture snippets with golden trees, tables
+scoreboard: the test-suite (1,272 fixture snippets with golden trees, tables
 mirroring nu-parser's own tests, every built-in command's examples), a
 traceability matrix from every `SyntaxShape`, keyword, `FlatShape` and
 `ParseError` of nu-parser to a fixture and a test (`src/docs/11-traceability.md`),
 and differential parsing of every corpus and their mutations with nu-parser
-itself. See [`TESTING.md`](TESTING.md).
+itself. See [`TESTING.md`](TESTING.md). The grammar files in `grammar/` are
+generated from `grammar/grammar.md` by `nu tools/scripts/gen-grammar.nu`
+(`--check` fails when they are stale).
 
 ## Design
 
@@ -171,7 +185,8 @@ IR. This crate is a pure syntactic front end:
 
 Because the item lexer and the expression grammar are the same, the two
 parsers accept the same programs; the only divergences are semantic checks
-that need declarations or types.
+that need declarations, signatures, constant evaluation, types or files
+(`grammar/grammar.md`, section 9.4, lists them).
 
 ### Measured against the reference
 
@@ -181,7 +196,13 @@ Nushell scripts in `tools/scripts/`):
 * **Accept/reject parity.** Over `nu_scripts` and the standard library (1,599
   files) the verdicts agree with `nu-check` except where `nu-check` fails for
   semantic reasons (missing modules, type mismatches, signature-dependent
-  argument counts). No file that nu accepts is rejected here.
+  argument counts). No file that nu accepts is rejected here. The
+  differential harness parses the fixtures, the corpora, nu-std, nushell's
+  own `.nu` tests, `nu_scripts`, every command example and the book with both
+  parsers, then mutates each input three times; no syntactic disagreement
+  remains (the rows it still prints are `plugin use` calls, because the
+  harness registers no plugin commands, and errors that need files or
+  signatures).
 * **Token classification.** For every standard-library file,
   `tools/scripts/flatcmp.nu` compares the output of nu's `ast --flatten` with
   this crate's `flatten()` segment by segment. The only differences are the
@@ -295,6 +316,13 @@ Run everything with `cargo test`; run the comparison with Nushell itself
 with `nu tools/scripts/verify.nu`; run the benchmarks with `cargo bench`.
 
 ## Grammar Railroad Diagram
+
+`grammar/grammar.md` is the source of truth; `grammar.bnf` and
+`grammar.ebnf` are generated from its ```` ```ebnf ```` fences:
+```sh
+nu tools/scripts/gen-grammar.nu           # rewrite grammar/grammar.bnf and grammar/grammar.ebnf
+nu tools/scripts/gen-grammar.nu --check   # exit 1 when they are stale
+```
 
 I used this tool to generate the grammar.html from grammar.ebnf
 ```sh

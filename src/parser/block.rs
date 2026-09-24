@@ -4,6 +4,15 @@
 //! attaches comments, absorbs the rest of a line after an assignment operator,
 //! collects redirections and attribute lines, and recovers from errors at
 //! statement boundaries. It never looks inside an item.
+//!
+//! The rules for newlines around `|` are nu's exactly: a `|` continues the
+//! previous line when only an end of line, or comment lines each on their own
+//! line, stand between them (`a\n# c\n| b`); after a `|` the pipeline goes on
+//! across one end of line and comment lines (`a |\n# c\n b`). A blank line on
+//! either side closes the pipeline: `a\n\n| b` and `a |\n\n b` are two
+//! pipelines each (the trailing `|` of the first is dropped silently, as nu
+//! does), and a `|` that nothing but comments follow at the end of a block is
+//! an error.
 
 use crate::ast::{Block, Comment, Expr, ExprKind, Pipeline, PipelineElement};
 use crate::error::{Diagnostic, ErrorKind};
@@ -25,7 +34,7 @@ pub struct RawCommand {
     pub attributes: Vec<Vec<Token>>,
     /// Redirections and their file targets (`None` for `e>|`).
     pub redirections: Vec<(Spanned<RedirectOp>, Option<Token>)>,
-    /// The span of the `|` (or `e>|`) that ended the command, if any.
+    /// The span of an `e>|` (or `o+e>|`) that ended the command, if any.
     pub pipe_after: Option<Span>,
     /// Comments found between the command's tokens.
     pub comments: Vec<Comment>,
@@ -44,9 +53,24 @@ impl RawCommand {
 /// a [`ExprKind::Garbage`] pipeline, so parsing continues with the next line.
 pub fn parse_block<'a>(st: St<'_, 'a>, mut c: Cursor<'_>, span: Span) -> Block<'a> {
     predeclare(st, c.all());
+    // nu's lite parser: a block whose last token, skipping trailing comment
+    // lines, is a `|` has a pipeline with no end (`ls |`, `ls |\n# c`,
+    // `alias x = ls |`), whatever absorbed the pipe.
+    if last_non_comment_token(c.all()) == Some(TokenKind::Pipe)
+        && let Some(last) = c.all().iter().rev().find(|t| t.kind == TokenKind::Pipe)
+    {
+        st.error(
+            Diagnostic::new(ErrorKind::UnexpectedEof("command after `|`"), last.span)
+                .with_context("pipeline")
+                .with_help("the pipeline has no end: add a command after the `|` or remove it"),
+        );
+    }
     let mut pipelines: Vec<Pipeline<'a>> = Vec::new();
     let mut pending: Vec<Comment> = Vec::new();
     let mut last = TokenKind::Eol;
+    // Set when a pipeline ended with a `|` that a blank line closed: nu's
+    // lexer then refuses a `;` before the next item.
+    let mut dangling_pipe: Option<Span> = None;
     while let Some(tok) = c.peek() {
         match tok.kind {
             TokenKind::Eol => {
@@ -57,6 +81,11 @@ pub fn parse_block<'a>(st: St<'_, 'a>, mut c: Cursor<'_>, span: Span) -> Block<'
                 last = TokenKind::Eol;
             }
             TokenKind::Semicolon => {
+                if let Some(pipe) = dangling_pipe {
+                    st.error(Diagnostic::new(ErrorKind::ExtraTokens, tok.span).with_help(format!(
+                        "the pipeline is still open after the `|` at {pipe}; add a command or remove the `;`"
+                    )));
+                }
                 if !matches!(last, TokenKind::Eol | TokenKind::Semicolon)
                     && let Some(p) = pipelines.last_mut()
                     && p.terminator.is_none()
@@ -76,10 +105,14 @@ pub fn parse_block<'a>(st: St<'_, 'a>, mut c: Cursor<'_>, span: Span) -> Block<'
                 last = TokenKind::Comment;
             }
             _ => {
+                dangling_pipe = None;
                 let start = c.position();
                 let start_span = tok.span;
                 match pipeline(st, &mut c, std::mem::take(&mut pending)) {
-                    Ok(p) => pipelines.push(p),
+                    Ok((p, dangling)) => {
+                        dangling_pipe = dangling;
+                        pipelines.extend(p);
+                    }
                     Err(e) => {
                         st.error(into_diagnostic(e));
                         c.reset(start);
@@ -124,8 +157,10 @@ fn garbage_pipeline<'a>(span: Span) -> Pipeline<'a> {
 }
 
 /// Declare the names of `def`/`extern`/`alias` statements in this block before
-/// parsing it, so calls to multi-word commands defined later resolve.
+/// parsing it, so calls to multi-word commands defined later resolve. Like nu,
+/// a `def` or `extern` name declared twice in one block is an error.
 fn predeclare(st: St<'_, '_>, tokens: &[Token]) {
+    let mut declared: Vec<&str> = Vec::new();
     let mut at_line_start = true;
     let mut idx = 0;
     while let Some(tok) = tokens.get(idx) {
@@ -135,115 +170,186 @@ fn predeclare(st: St<'_, '_>, tokens: &[Token]) {
             TokenKind::Comment => {}
             TokenKind::Item if at_line_start => {
                 at_line_start = false;
-                let mut words = tokens[idx..].iter().take_while(|t| t.kind == TokenKind::Item).map(|t| st.tok(t));
+                let mut words =
+                    tokens[idx..].iter().take_while(|t| t.kind == TokenKind::Item).map(|t| (st.tok(t), t.span));
                 let head = match st.tok(tok) {
-                    "export" => words.next().unwrap_or(""),
+                    "export" => words.next().map_or("", |w| w.0),
                     head => head,
                 };
-                if matches!(head, "def" | "extern" | "alias")
-                    && let Some(name) = words.find(|w| !w.starts_with("--"))
-                {
-                    let name = name.trim_matches(['"', '\'', '`']);
-                    if !name.is_empty() {
-                        st.declare_command(name);
-                    }
+                if !matches!(head, "def" | "extern" | "alias") {
+                    continue;
                 }
+                let Some((name, name_span)) = words.find(|w| !w.0.starts_with('-')) else { continue };
+                let name = name.trim_matches(['"', '\'', '`']);
+                if name.is_empty() {
+                    continue;
+                }
+                st.declare_command(name);
+                // nu predeclares a definition only when a signature item follows the name.
+                let has_signature = head != "alias" && words.any(|w| w.0.starts_with(['[', '(']));
+                if !has_signature {
+                    continue;
+                }
+                if declared.contains(&name) {
+                    st.error(
+                        Diagnostic::message("duplicate command definition within a block", name_span)
+                            .with_help(format!("`{name}` is already defined in this block")),
+                    );
+                }
+                declared.push(name);
             }
             _ => at_line_start = false,
         }
     }
 }
 
-/// If a `|` follows the current position after nothing but newlines and
-/// comments, return its index: `a\n# c\n| b` continues the pipeline.
+/// The last token that is not part of a trailing `([Comment]+ [Eol])*`
+/// sequence: nu's `last_non_comment_token`, used to tell `ls |\n` (fine)
+/// from `ls |` and `ls |\n# c` (a pipeline with no end).
+fn last_non_comment_token(tokens: &[Token]) -> Option<TokenKind> {
+    let mut expect = TokenKind::Comment;
+    for tok in tokens.iter().rev() {
+        match (tok.kind, expect) {
+            (TokenKind::Comment, TokenKind::Comment | TokenKind::Eol) => expect = TokenKind::Eol,
+            (TokenKind::Eol, TokenKind::Eol) => expect = TokenKind::Comment,
+            (kind, _) => return Some(kind),
+        }
+    }
+    None
+}
+
+/// If a `|` on a later line continues the pipeline, return its index: exactly
+/// one end of line, then any number of comment lines (`Eol (Comment Eol)*`),
+/// then the pipe. A blank line in between closes the pipeline instead.
 fn pipe_ahead(c: &Cursor<'_>) -> Option<usize> {
     let rest = c.rest();
-    let idx = rest.iter().position(|t| !matches!(t.kind, TokenKind::Eol | TokenKind::Comment))?;
-    (rest[idx].kind == TokenKind::Pipe).then_some(c.position() + idx)
+    let mut idx = 0;
+    if rest.first()?.kind != TokenKind::Eol {
+        return None;
+    }
+    idx += 1;
+    loop {
+        match rest.get(idx)?.kind {
+            TokenKind::Pipe => return Some(c.position() + idx),
+            TokenKind::Comment if rest.get(idx + 1)?.kind == TokenKind::Eol => idx += 2,
+            _ => return None,
+        }
+    }
 }
 
 /// Consume newlines and comments up to a pipe found by [`pipe_ahead`],
-/// recording the comments, and return the pipe (consumed).
-fn take_pipe_ahead(st: St<'_, '_>, c: &mut Cursor<'_>, comments: &mut Vec<Comment>) -> Option<Span> {
-    let idx = pipe_ahead(c)?;
+/// recording the comments.
+fn take_pipe_ahead(st: St<'_, '_>, c: &mut Cursor<'_>, comments: &mut Vec<Comment>) -> bool {
+    let Some(idx) = pipe_ahead(c) else { return false };
     while c.position() < idx {
-        let tok = c.next()?;
-        if tok.kind == TokenKind::Comment {
+        if let Some(tok) = c.next()
+            && tok.kind == TokenKind::Comment
+        {
             st.comment(tok.span);
             comments.push(Comment { span: tok.span });
         }
     }
-    c.next().map(|pipe| pipe.span)
+    true
 }
 
-/// After a `|`: `a |\n  b`, `a | # comment\n  b` and `a | | b` all continue
-/// the pipeline. Consumes newlines, comments and extra pipes; returns
-/// whether a newline was crossed.
-fn skip_pipe_continuation(
-    st: St<'_, '_>,
-    c: &mut Cursor<'_>,
-    pipe: &mut Option<Span>,
-    comments: &mut Vec<Comment>,
-) -> bool {
-    let mut newline = false;
-    while let Some(tok) = c.peek() {
-        match tok.kind {
-            TokenKind::Eol if pipe.is_some() => newline = true,
-            TokenKind::Comment if pipe.is_some() => {
-                st.comment(tok.span);
-                comments.push(Comment { span: tok.span });
-            }
-            TokenKind::Pipe => *pipe = Some(tok.span),
-            _ => break,
-        }
+/// What follows a `|` (just consumed) after its continuation lines.
+enum AfterPipe {
+    /// A command follows.
+    Command,
+    /// A blank line or the end of the block: the pipeline ends here and the
+    /// `|` is dropped.
+    Dangling,
+}
+
+/// After a `|`: consume comments on the same line, then one end of line and
+/// any comment lines (`Eol (Comment Eol)*`), the way nu's lite parser keeps a
+/// pipeline open across them.
+fn after_pipe(st: St<'_, '_>, c: &mut Cursor<'_>, pipe: Span, comments: &mut Vec<Comment>) -> PResult<AfterPipe> {
+    let mut comment = |st: St<'_, '_>, tok: &Token| {
+        st.comment(tok.span);
+        comments.push(Comment { span: tok.span });
+    };
+    while let Some(tok) = c.peek().filter(|t| t.kind == TokenKind::Comment) {
+        comment(st, tok);
         c.next();
     }
-    newline
+    if c.peek().is_some_and(|t| t.kind == TokenKind::Eol) {
+        c.next();
+        while let Some(tok) = c.peek().filter(|t| t.kind == TokenKind::Comment)
+            && c.rest().get(1).is_some_and(|t| t.kind == TokenKind::Eol)
+        {
+            comment(st, tok);
+            c.next();
+            c.next();
+        }
+    }
+    // A `|` that only comments follow at the end of the block is reported
+    // once, by `parse_block`, whichever command absorbed it.
+    match c.peek().map(|t| t.kind) {
+        None | Some(TokenKind::Eol) => Ok(AfterPipe::Dangling),
+        Some(TokenKind::Semicolon) => Err(cut(
+            Diagnostic::new(ErrorKind::UnexpectedEof("command after `|`"), pipe).with_context("pipeline")
+        )),
+        Some(_) => Ok(AfterPipe::Command),
+    }
 }
 
-/// Parse one pipeline: commands separated by `|`.
-fn pipeline<'a>(st: St<'_, 'a>, c: &mut Cursor<'_>, leading_comments: Vec<Comment>) -> PResult<Pipeline<'a>> {
-    let mut elements: Vec<PipelineElement<'a>> = Vec::new();
+/// Parse one pipeline: commands separated by `|`. Also returns the span of a
+/// trailing `|` that a blank line closed, if any. `None` when there was no
+/// command at all (a lone `|` before a blank line).
+fn pipeline<'a>(
+    st: St<'_, 'a>,
+    c: &mut Cursor<'_>,
+    leading_comments: Vec<Comment>,
+) -> PResult<(Option<Pipeline<'a>>, Option<Span>)> {
+    // The lite parse first: collect the commands, then parse them, because a
+    // command is parsed differently when it is one element of a longer pipeline.
+    let mut raws: Vec<(Option<Span>, RawCommand)> = Vec::new();
     let mut trailing_comments = Vec::new();
     let mut pipe: Option<Span> = None;
-    // A pipeline may start with `|` (`( | str join)`): the empty first command is dropped.
-    let mut newline_after_pipe = skip_pipe_continuation(st, c, &mut pipe, &mut trailing_comments);
-    loop {
-        if let Some(pipe_span) = pipe
-            && c.peek().is_none_or(|t| matches!(t.kind, TokenKind::Semicolon | TokenKind::Eol))
-        {
-            // Like nu's lite parser, a `|` followed by a newline and then the end
-            // of the block is tolerated (`ls |\n`); one that is the last token
-            // (`ls |`, `(ls |\n)`, `let x = 1 |`) is not.
-            if c.peek().is_none() && newline_after_pipe && !elements.is_empty() {
+    let mut dangling = None;
+    'commands: loop {
+        // A pipeline may start with `|` (`( | str join)`) and `a | | b` is
+        // `a | b`: the empty commands are dropped.
+        while let Some(tok) = c.peek().filter(|t| t.kind == TokenKind::Pipe) {
+            let span = tok.span;
+            c.next();
+            pipe = Some(span);
+            if let AfterPipe::Dangling = after_pipe(st, c, span, &mut trailing_comments)? {
+                dangling = pipe.take();
+                break 'commands;
+            }
+        }
+        if pipe.is_none() && !raws.is_empty() {
+            // After a command: the pipeline goes on only through a `|` on a later line.
+            if !take_pipe_ahead(st, c, &mut trailing_comments) {
                 break;
             }
-            return Err(cut(
-                Diagnostic::new(ErrorKind::UnexpectedEof("command after `|`"), pipe_span).with_context("pipeline")
-            ));
+            continue;
         }
-        let raw = raw_command(st, c)?;
+        let raw = raw_command(st, c, pipe.is_none())?;
         trailing_comments.extend(raw.comments.iter().copied());
-        let (expr, redirection) = statement::parse_command(st, &raw)?;
+        let pipe_after = raw.pipe_after;
+        raws.push((pipe.take(), raw));
+        if let Some(span) = pipe_after {
+            pipe = Some(span);
+            if let AfterPipe::Dangling = after_pipe(st, c, span, &mut trailing_comments)? {
+                dangling = pipe.take();
+                break;
+            }
+        }
+    }
+    if raws.is_empty() {
+        // Only pipes (`|` and a blank line): nu drops the empty command.
+        return Ok((None, dangling));
+    }
+    let single = raws.len() == 1;
+    let mut elements: Vec<PipelineElement<'a>> = Vec::with_capacity(raws.len());
+    for (pipe, raw) in &raws {
+        let (expr, redirection) = statement::parse_command(st, raw, !single)?;
         let start = pipe.map_or(expr.span.start, |p| p.start);
         let end = redirection.as_ref().map_or(expr.span.end, |r| r.span().end.max(expr.span.end));
-        elements.push(PipelineElement { span: Span::new(start, end), pipe, expr, redirection });
-        let Some(next_pipe) = raw.pipe_after.or_else(|| take_pipe_ahead(st, c, &mut trailing_comments)) else { break };
-        pipe = Some(next_pipe);
-        newline_after_pipe = skip_pipe_continuation(st, c, &mut pipe, &mut trailing_comments);
-    }
-    // Like nu ("statement used in pipeline"): a declaration or a `for` loop
-    // is a statement of its own, never an element of a longer pipeline, and
-    // `source`, `hide`, `overlay` and `plugin use` cannot follow a pipe.
-    if elements.len() > 1
-        && let Some(statement) = elements
-            .iter()
-            .enumerate()
-            .find(|(i, e)| is_statement_only(&e.expr) || (*i > 0 && is_statement_call(st, &e.expr)))
-    {
-        return Err(cut(Diagnostic::message("statement used in pipeline", statement.1.expr.span).with_help(
-            "declarations, `for`, `source`, `hide`, `overlay` and `plugin use` are statements, not pipeline elements",
-        )));
+        elements.push(PipelineElement { span: Span::new(start, end), pipe: *pipe, expr, redirection });
     }
     let span = elements[0].span.merge(elements.last().map_or(elements[0].span, |e| e.span));
     let terminator = match c.peek() {
@@ -253,42 +359,16 @@ fn pipeline<'a>(st: St<'_, 'a>, c: &mut Cursor<'_>, leading_comments: Vec<Commen
         }
         _ => None,
     };
-    Ok(Pipeline { span, elements, leading_comments, trailing_comments, terminator })
+    Ok((Some(Pipeline { span, elements, leading_comments, trailing_comments, terminator }), dangling))
 }
 
-fn is_statement_only(expr: &Expr<'_>) -> bool {
-    matches!(
-        expr.kind,
-        ExprKind::Def(_)
-            | ExprKind::Extern(_)
-            | ExprKind::Alias(_)
-            | ExprKind::Module(_)
-            | ExprKind::Use(_)
-            | ExprKind::Export(_)
-            | ExprKind::ExportEnv(_)
-            | ExprKind::AttributeBlock(_)
-            | ExprKind::For(_)
-    )
-}
-
-/// Calls nu refuses after a `|` (`HeadKind::Builtin` in its `parse_expression`).
-fn is_statement_call(st: St<'_, '_>, expr: &Expr<'_>) -> bool {
-    let ExprKind::Call(call) = &expr.kind else { return false };
-    let head = st.text(call.head.span);
-    let first_word = head.split_whitespace().next().unwrap_or("");
-    match first_word {
-        "source" | "hide" | "plugin" if head.starts_with("plugin use") || first_word != "plugin" => true,
-        "overlay" => {
-            !head.starts_with("overlay list") && !(call.args.first().is_some_and(|a| st.text(a.span()) == "list"))
-        }
-        _ => false,
-    }
-}
-
-/// Collect the tokens of one command.
-fn raw_command(st: St<'_, '_>, c: &mut Cursor<'_>) -> PResult<RawCommand> {
+/// Collect the tokens of one command. `first` is set for the first command of
+/// a pipeline, the only place attribute lines can precede it.
+fn raw_command(st: St<'_, '_>, c: &mut Cursor<'_>, first: bool) -> PResult<RawCommand> {
     let mut raw = RawCommand::default();
-    attribute_lines(st, c, &mut raw)?;
+    if first {
+        attribute_lines(st, c, &mut raw)?;
+    }
     // After `=` everything to the end of the line belongs to the command.
     let mut absorbing = false;
     while let Some(&tok) = c.peek() {
@@ -302,21 +382,14 @@ fn raw_command(st: St<'_, '_>, c: &mut Cursor<'_>) -> PResult<RawCommand> {
             TokenKind::Eol if absorbing => {
                 // `$x = a |\n b` and `$x = a\n | b` continue the assignment's pipeline.
                 let ends_with_pipe = raw.parts.last().is_some_and(|p| p.kind == TokenKind::Pipe);
-                match (ends_with_pipe, pipe_ahead(c)) {
-                    (true, _) => {}
-                    (false, Some(idx)) => {
-                        while c.position() < idx {
-                            if let Some(t) = c.next()
-                                && t.kind == TokenKind::Comment
-                            {
-                                st.comment(t.span);
-                                raw.comments.push(Comment { span: t.span });
-                            }
-                        }
-                        continue;
-                    }
-                    (false, None) => break,
+                if ends_with_pipe {
+                    c.next();
+                    continue;
                 }
+                if take_pipe_ahead(st, c, &mut raw.comments) {
+                    continue;
+                }
+                break;
             }
             TokenKind::Comment => {
                 st.comment(tok.span);
@@ -338,11 +411,7 @@ fn raw_command(st: St<'_, '_>, c: &mut Cursor<'_>) -> PResult<RawCommand> {
                 };
                 raw.redirections.push((Spanned::new(op, tok.span), Some(target)));
             }
-            TokenKind::Pipe => {
-                raw.pipe_after = Some(tok.span);
-                c.next();
-                break;
-            }
+            TokenKind::Pipe => break,
             TokenKind::PipePipe => {
                 return Err(cut(Diagnostic::new(ErrorKind::ShellSyntax { found: "||", use_instead: "or" }, tok.span)
                     .with_help("use `or` for boolean logic, or `try { } catch { }` to run a fallback command")));
@@ -358,15 +427,15 @@ fn raw_command(st: St<'_, '_>, c: &mut Cursor<'_>) -> PResult<RawCommand> {
     Ok(raw)
 }
 
-/// Leading `@name args` lines, each up to the end of its line. Like nu, the
-/// definition must follow on the very next line: a blank or comment line in
-/// between is an error.
+/// Leading `@name args` lines, each up to the end of its line or a `;`. Like
+/// nu, everything on the line is an argument of the attribute, pipes and
+/// redirections included, and the definition must follow on the very next
+/// line: a blank or comment line in between is an error.
 fn attribute_lines(st: St<'_, '_>, c: &mut Cursor<'_>, raw: &mut RawCommand) -> PResult<()> {
     while c.peek().is_some_and(|t| t.kind == TokenKind::Item && st.tok(t).starts_with('@')) {
         let mut attr = Vec::new();
         while let Some(&tok) = c.peek() {
             match tok.kind {
-                TokenKind::Item => attr.push(tok),
                 TokenKind::Comment => {
                     st.comment(tok.span);
                     raw.comments.push(Comment { span: tok.span });
@@ -375,13 +444,8 @@ fn attribute_lines(st: St<'_, '_>, c: &mut Cursor<'_>, raw: &mut RawCommand) -> 
                     c.next();
                     break;
                 }
-                _ => {
-                    return Err(cut(Diagnostic::message(
-                        "attributes cannot contain pipelines or redirections",
-                        tok.span,
-                    )
-                    .with_context("attribute")));
-                }
+                TokenKind::Eof => break,
+                _ => attr.push(Token { kind: TokenKind::Item, span: tok.span }),
             }
             c.next();
         }

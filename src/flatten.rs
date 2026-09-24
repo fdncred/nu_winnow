@@ -86,19 +86,23 @@ pub enum FlatShape {
     CellPath,
     /// `@attribute`.
     Attribute,
+    /// Text nu-parser accepts and discards (see [`Ast::ignored`]).
+    Ignored,
 }
 
 /// Flatten an AST into source-ordered `(span, shape)` pairs.
 pub fn flatten(ast: &Ast<'_>) -> Vec<(Span, FlatShape)> {
     let mut f = Flattener { src: ast.source, out: Vec::new() };
     f.visit_block(&ast.block);
-    // Comments win over the shapes of the constructs they sit in (the gaps of
-    // a list or record), so cut them out of every other shape.
-    let comments: Vec<Span> = ast.comments.iter().map(|c| c.span).collect();
-    let mut out = Vec::with_capacity(f.out.len() + comments.len());
+    // Comments and ignored text win over the shapes of the constructs they
+    // sit in (the gaps of a list or record), so cut them out of every other shape.
+    let mut cuts: Vec<(Span, FlatShape)> = ast.comments.iter().map(|c| (c.span, FlatShape::Comment)).collect();
+    cuts.extend(ast.ignored.iter().map(|s| (*s, FlatShape::Ignored)));
+    cuts.sort_by_key(|(s, _)| (s.start, s.end));
+    let mut out = Vec::with_capacity(f.out.len() + cuts.len());
     for (span, shape) in f.out {
         let mut start = span.start;
-        for c in comments.iter().filter(|c| c.start < span.end && span.start < c.end) {
+        for (c, _) in cuts.iter().filter(|(c, _)| c.start < span.end && span.start < c.end) {
             if c.start > start {
                 out.push((Span::new(start, c.start), shape));
             }
@@ -108,7 +112,7 @@ pub fn flatten(ast: &Ast<'_>) -> Vec<(Span, FlatShape)> {
             out.push((Span::new(start, span.end), shape));
         }
     }
-    out.extend(comments.into_iter().map(|c| (c, FlatShape::Comment)));
+    out.extend(cuts);
     out.sort_by_key(|(s, _)| (s.start, s.end));
     out.dedup();
     out
@@ -444,7 +448,16 @@ impl<'a> Visitor<'a> for Flattener<'_> {
                 }
                 self.push(d.name.span, FlatShape::Definition);
                 self.visit_signature(&d.signature);
-                self.block_braces(Span::new(d.signature.span.end, span.end), &d.body, FlatShape::Block);
+                match &d.body_params {
+                    // `def f [] {|x| }`: like a closure, the braces around the parameters.
+                    Some(p) => {
+                        self.push(Span::new(d.signature.span.end, p.span.start), FlatShape::Block);
+                        self.visit_signature(p);
+                        self.visit_block(&d.body);
+                        self.push(Span::new(d.body.span.end, span.end), FlatShape::Block);
+                    }
+                    None => self.block_braces(Span::new(d.signature.span.end, span.end), &d.body, FlatShape::Block),
+                }
             }
             ExprKind::Extern(x) => {
                 self.push(x.name.span, FlatShape::Definition);
@@ -453,7 +466,9 @@ impl<'a> Visitor<'a> for Flattener<'_> {
             ExprKind::Alias(a) => {
                 self.push(a.name.span, FlatShape::Definition);
                 self.push(a.eq, FlatShape::Operator);
-                self.visit_expr(&a.value);
+                if let Some(value) = &a.value {
+                    self.visit_expr(value);
+                }
             }
             ExprKind::Use(u) => {
                 self.visit_expr(&u.module);
@@ -464,6 +479,10 @@ impl<'a> Visitor<'a> for Flattener<'_> {
                                 self.push(n.span, FlatShape::String);
                             }
                             self.gaps(m.span, names.iter().map(|n| n.span), FlatShape::List);
+                        }
+                        UseMemberKind::Ignored(e) => {
+                            self.visit_expr(e);
+                            self.gaps(m.span, std::iter::once(e.span), FlatShape::Ignored);
                         }
                         _ => self.push(m.span, FlatShape::String),
                     }
@@ -505,7 +524,10 @@ impl<'a> Visitor<'a> for Flattener<'_> {
                     self.visit_expr(&arm.body);
                     inner.push(arm.body.span);
                 }
-                self.gaps(m.block_span, inner.into_iter(), FlatShape::Block);
+                match &m.value_block {
+                    Some(b) => self.visit_expr(b),
+                    None => self.gaps(m.block_span, inner.into_iter(), FlatShape::Block),
+                }
             }
             ExprKind::For(f) => {
                 self.var_decl(f.var.span);

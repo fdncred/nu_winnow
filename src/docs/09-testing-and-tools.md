@@ -36,8 +36,9 @@ a comment when it is surprising.
 `tests/fixtures/accept/<area>/*.nu` and `tests/fixtures/reject/<area>/*.nu`
 hold one snippet each: every literal spelling, every statement form, every
 layout (multi-line, leading pipes, comments in every position, CRLF, tabs,
-Unicode) and every error the parser reports, about 850 files organised by
-grammar area. Many are lifted from Nushell's own `crates/nu-parser/tests`
+Unicode) and every error the parser reports, about 1,270 files organised by
+grammar area, including one for every difference from nu-parser that
+`grammar/grammar.md` (section 9) ever recorded. Many are lifted from Nushell's own `crates/nu-parser/tests`
 and `tests/repl` suites. `rstest`'s `#[files]` makes each file a test:
 
 * an `accept` fixture must parse with no diagnostics, with nested spans on
@@ -110,7 +111,12 @@ summary counts `ours_rejects`, `nu_syntax_rejects`, `nu_semantic_rejects`,
 deleted, duplicated or swapped, a delimiter inserted, a character dropped,
 the text truncated) and both parsers must still agree, which is how the
 edge rules of chapter 04 were found. `--details` prints each disagreement
-with both messages. The exit status gates a check-in.
+with both messages. The exit status gates a check-in. The harness's engine
+state has no plugin commands, so `plugin use` snippets are external calls
+for it and appear as `ours_rejects`: an artifact, not a disagreement
+(`fixtures-compare` with the real `nu` is the referee there). When GitHub's
+`main` is behind the local checkout, uncomment the `[patch]` block in
+`tools/nushell-harness/Cargo.toml` to build against the checkout.
 
 ## The verification ladder (`tools/scripts/verify.nu`)
 
@@ -143,6 +149,12 @@ this writing.
   only where nu needs a signature (`get a.0` is a cell path), around
   attribute lines and `$.`.
 * `gen-std-commands.nu STD_DIR` regenerates `std_commands.txt`.
+* `gen-grammar.nu` regenerates `grammar/grammar.bnf` and `grammar/grammar.ebnf`
+  from the fences of `grammar/grammar.md`; `--check` fails when they are
+  stale. The BNF is the audit trail from nu-parser's source to this crate:
+  every rule carries a `; nu:` line (file and function upstream) and a
+  `; here:` line (the function here, or `consumer`), and section 9 records
+  the differences that were found and closed.
 
 Run these after any change to the lexer or to `value.rs`; they take seconds.
 

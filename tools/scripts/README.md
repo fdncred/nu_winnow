@@ -31,6 +31,15 @@ All scripts run with `nu` 0.115.2 and need the example binary built with
   `cargo build --release --example nufmt`.
 * `gen-std-commands.nu [STD_DIR]` — regenerates `std_commands.txt`, the list
   of standard-library exports both bare and module-prefixed.
+* `gen-grammar.nu` — regenerates `grammar/grammar.bnf` (the ```` ```ebnf ````
+  fences of `grammar/grammar.md` verbatim, with the section headings as
+  comments) and `grammar/grammar.ebnf` (the same grammar in ISO 14977 style,
+  which `ebnf2railroad` and the VS Code EBNF extension understand: `<a-b>
+  ::=` becomes `a_b =`, `1*x` becomes `x, { x }`, `; comment` becomes
+  `(* comment *)`, prose rules become special sequences). `--check` exits 1
+  when the files are stale; `--root DIR` works on another checkout. Needs no
+  external tool; the railroad diagram is then rendered with `ebnf2railroad`
+  as the README says.
 
 ```text
 nu tools/scripts/verify.nu
@@ -40,4 +49,5 @@ nu tools/scripts/nucheck-compare.nu ~/src/nu_scripts ~/src/nushell/crates/nu-std
 nu tools/scripts/flatcmp.nu --commands tools/scripts/std_commands.txt ...(glob ~/src/nushell/crates/nu-std/**/*.nu)
 nu tools/scripts/nufmt-fixtures.nu --diff closure
 nu tools/scripts/gen-std-commands.nu ~/src/nushell/crates/nu-std | save -f tools/scripts/std_commands.txt
+nu tools/scripts/gen-grammar.nu --check
 ```

@@ -8,7 +8,7 @@ tool's flags are in [`src/docs/how-to.md`](src/docs/how-to.md).
 ## The short version
 
 ```nushell
-cargo test                      # everything that needs nothing but Rust: about 1,350 tests, a few seconds
+cargo test                      # everything that needs nothing but Rust: about 1,750 tests, a few seconds
 nu tools/scripts/verify.nu      # everything that compares with Nushell itself, a few minutes, prints a scoreboard
 ```
 
@@ -21,7 +21,8 @@ external tools. `verify.nu` needs the checkouts listed below.
 | --- | --- | --- |
 | `nu` 0.115 on `PATH` | | every script in `tools/scripts/` |
 | Nushell source checkout | `~/src/nushell` (also `../nushell` for the traceability test) | `extract-corpus.nu`, traceability, the corpora `verify.nu` reads (`crates/nu-std`, `tests`) |
-| network, for the first harness build | | `tools/nushell-harness` fetches `nu-parser` from nushell's `main` on GitHub; `cargo update` there moves to the newest commit, or uncomment its `[patch]` block to use the checkout next to this repository |
+| network, for the first harness build | | `tools/nushell-harness` fetches `nu-parser` from nushell's `main` on GitHub; `cargo update` there moves to the newest commit, or uncomment its `[patch]` block to use the checkout next to this repository (needed when GitHub's `main` is behind the checkout: the differential rung then reports the checkout's behaviour) |
+| `ebnf2railroad` (npm), optional | | linting `grammar/grammar.ebnf` and rendering `grammar/grammar.html` (README, "Grammar Railroad Diagram") |
 | nushell.github.io checkout | `~/src/nushell.github.io` | `extract-corpus.nu` (the book's code blocks) |
 | nu_scripts checkout | `~/src/nu_scripts` | `verify.nu`, `nucheck-compare.nu`, `differential` |
 | nushell/nufmt checkout | `~/src/nufmt` | `nufmt-fixtures.nu` |
@@ -97,7 +98,16 @@ traced to a parser change or to a Nushell change.
   messages and the text. nu-parser's error is classified as syntax or
   semantic by its variant and message (`is_syntax_error` in
   `tools/nushell-harness/src/bin/differential.rs`); a `known` row is one of
-  the documented tolerances in `KNOWN_DIFFERENCES` there.
+  the documented tolerances in `KNOWN_DIFFERENCES` there. The harness builds
+  an engine state without plugin commands, so every `plugin use` snippet is
+  an external call for it and shows up as `ours_rejects`; those rows are
+  artifacts (the `nu` on `PATH`, through `fixtures-compare`, is the
+  referee for them). The other rows it prints need a file, a module or a
+  signature (`use eggs foo foo`, `bytes at 0x[01]`), which are the
+  consumer's checks listed in `grammar/grammar.md` section 9.4.
+* For one snippet, `open --raw file.nu | nu-check` is the quickest referee;
+  keep the snippet in a file made with `printf '%s\n'` so that shell
+  escapes survive, and check it with `cat -v` when it contains `\r` or `\t`.
 * The traceability test names the unmapped upstream item; add a row to
   chapter 11, then a fixture and a test for it.
 
@@ -113,6 +123,12 @@ traced to a parser change or to a Nushell change.
    the matching `#[rstest]` table in `tests/language.rs`.
 4. Add the fixture pattern to the row of chapter 11 it belongs to.
 5. `nu tools/scripts/fixtures-compare.nu` to confirm Nushell agrees.
+6. If the rule itself changed, update its `; here:` annotation (and the rule,
+   when nu's grammar changed) in `grammar/grammar.md`, then regenerate the
+   grammar files: `nu tools/scripts/gen-grammar.nu`, `ebnf2railroad --lint
+   grammar/grammar.ebnf --no-target` and the `grammar.html` command in the
+   README. `gen-grammar.nu --check` tells whether the generated files are
+   stale.
 
 ## When the Nushell checkout moves
 
@@ -126,7 +142,10 @@ nu tools/scripts/verify.nu --save tools/scripts/verify-history.nuon
 A construct that Nushell added appears as an unmapped item in the
 traceability test, as `nu_syntax_rejects` or `ours_rejects` in the
 differential rung, or as a new command example that does not parse. The `%`
-sigil was found exactly this way.
+sigil was found exactly this way. A rule that Nushell changed shows up in
+the same rungs; `grammar/grammar.md` names the nu-parser function behind
+every rule (`; nu:` lines, with the commit in its header), which is where to
+look first.
 
 ## Benchmarks
 

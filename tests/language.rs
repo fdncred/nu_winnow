@@ -788,7 +788,8 @@ fn confusing_records_are_refused(#[case] src: &str) {
 
 #[test]
 fn attribute_values() {
-    let ast = ok("@echo \"hello world\"\n@echo 42\ndef foo [] {}");
+    // nu's test registers an `attr echo` command; here it is declared in the source.
+    let ast = ok("def \"attr echo\" [x] { $x }\n@echo \"hello world\"\n@echo 42\ndef foo [] {}");
     match &last_expr(&ast).kind {
         ExprKind::AttributeBlock(a) => {
             assert_eq!(a.attributes.len(), 2);
@@ -822,10 +823,6 @@ fn arg_expr<'a>(arg: &'a Arg<'a>) -> &'a Expr<'a> {
 #[case("def test []: record<a: int b: int> -> record<c: int e: int> { {c: 1 e: 1} }")]
 #[case("def test []: table<a: int b: int> -> table<c: int e: int> { [ {c: 1 e: 1} ] }")]
 #[case("def test []: nothing -> record<c: int e: int> { {c: 1 e: 1} }")]
-#[case("def test [ in ] {}")]
-#[case("def test [ in: string ] {}")]
-#[case("def test [ --in (-i): list<any> ] {}")]
-#[case("def test [ env, in, nu ] {}")]
 #[case("extern cmd [in, --env]")]
 #[case("export extern cmd (in, --env, ...nu)")]
 #[case("extern cmd [in: bool=true]")]
@@ -833,6 +830,25 @@ fn arg_expr<'a>(arg: &'a Arg<'a>) -> &'a Expr<'a> {
 fn signature_forms_from_nushell_tests(#[case] src: &str) {
     let ast = ok(src);
     assert!(matches!(last_expr(&ast).kind, ExprKind::Def(_) | ExprKind::Extern(_) | ExprKind::Export(_)));
+}
+
+/// `in`, `nu`, `env` and `ans` are built-in variables: a parameter, a `let`
+/// or a match pattern may not declare them (`tests/parsing/mod.rs` in nushell).
+#[rstest]
+#[case("def test [ in ] {}")]
+#[case("def test [ in: string ] {}")]
+#[case("def test [ --in (-i): list<any> ] {}")]
+#[case("def test [ env, in, nu ] {}")]
+#[case("def test [ --env ] {}")]
+#[case("let in = 1")]
+#[case("mut nu = 1")]
+#[case("const ans = 1")]
+#[case("for env in [] {}")]
+#[case("do {|in| }")]
+#[case("match 1 { $in => 1 }")]
+#[case("match {a: 1} { {a: $env} => 1 }")]
+fn reserved_variable_names_are_errors(#[case] src: &str) {
+    assert!(err_text(src).contains("used as variable name"), "{src}");
 }
 
 #[rstest]

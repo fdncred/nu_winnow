@@ -905,8 +905,15 @@ impl<'a> Formatter<'a> {
                 self.flush_comments(p.span.start);
                 self.indent_str();
                 self.out.push_str(&text);
-                if let Some(d) = &p.description {
-                    self.comment_gap(p.span.end, d.span.start);
+                // The first description comment stays on the parameter's line;
+                // further ones (nu joins them into one description) keep their own lines.
+                for (i, d) in p.description.iter().enumerate() {
+                    if i == 0 {
+                        self.comment_gap(p.span.end, d.span.start);
+                    } else {
+                        self.newline();
+                        self.indent_str();
+                    }
                     self.out.push_str(self.comment_text(*d));
                     self.keep_line_end = !self.options.trim_trailing_whitespace;
                     while self.next_comment < self.comments.len()
@@ -1181,6 +1188,11 @@ impl<'a> Formatter<'a> {
     fn match_block(&mut self, m: &Match<'a>) {
         self.word("match");
         self.expr(&m.value);
+        if let Some(b) = &m.value_block {
+            // A closure or record where the arms should be: nu-parser accepts it.
+            self.expr(b);
+            return;
+        }
         self.word("{");
         self.opener_comment(m.block_span.start);
         self.newline();
@@ -1380,7 +1392,15 @@ impl<'a> Formatter<'a> {
                 }
                 self.spanned(d.name.span);
                 self.signature(&d.signature);
-                self.braced_block(&d.body, Span::new(d.signature.span.end, span.end), self.options.expand_def_bodies);
+                let outer = Span::new(d.signature.span.end, span.end);
+                match &d.body_params {
+                    // nu-parser accepts `|x|` on a def body and then discards it; keep it as written.
+                    Some(params) => {
+                        let closure = Closure { params: Some(params.clone()), body: d.body.clone() };
+                        self.closure(&closure, outer);
+                    }
+                    None => self.braced_block(&d.body, outer, self.options.expand_def_bodies),
+                }
             }
             ExprKind::Extern(x) => {
                 self.word("extern");
@@ -1391,7 +1411,9 @@ impl<'a> Formatter<'a> {
                 self.word("alias");
                 self.spanned(a.name.span);
                 self.word("=");
-                self.expr(&a.value);
+                if let Some(value) = &a.value {
+                    self.expr(value);
+                }
             }
             ExprKind::Use(u) => {
                 self.word("use");

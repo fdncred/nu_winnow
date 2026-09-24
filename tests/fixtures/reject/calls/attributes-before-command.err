@@ -1,5 +1,6 @@
-error: expected `def`, `extern` or `export` after attributes
-  --> reject/calls/attributes-before-command.nu:2:1
+error: missing required positional argument
+  --> reject/calls/attributes-before-command.nu:1:1
   |
-2 | ls
-  | ^^
+1 | @example x
+  | ^
+  = help: `attr example` takes 2 positional argument(s)

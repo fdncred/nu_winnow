@@ -46,12 +46,20 @@ pub fn dollar<'a>(st: St<'_, 'a>, span: Span) -> PResult<Expr<'a>> {
 
 /// An item starting with `(`: a range, a signature, or a subexpression with
 /// an optional cell path.
-pub fn paren<'a>(st: St<'_, 'a>, span: Span, hint: Hint) -> PResult<Expr<'a>> {
+pub fn paren<'a>(st: St<'_, 'a>, span: Span, hint: Hint<'_, 'a>) -> PResult<Expr<'a>> {
     match hint {
         _ if is_range_syntax(st.text(span)) => range(st, span),
         Hint::Signature => Ok(Expr::new(ExprKind::Garbage, span)),
         _ => full_cell_path(st, span, false),
     }
+}
+
+/// A cell-path literal without the `$.` (the `cell-path` shape): `a.b.0`.
+pub fn cell_path_literal<'a>(st: St<'_, 'a>, span: Span) -> PResult<Expr<'a>> {
+    let tokens = st.lex_span(span, LexOptions::CELL_PATH).map_err(cut)?;
+    let items: Vec<Token> = tokens.into_iter().filter(|t| t.kind == TokenKind::Item).collect();
+    let members = cell_path_members(st, &items, false)?;
+    Ok(Expr::new(ExprKind::CellPath(CellPath { members }), span))
 }
 
 /// Parse a head (`$var`, `(...)`, `[...]`, `{...}`) followed by `.member` accesses.
@@ -113,6 +121,12 @@ pub fn cell_path_members<'a>(st: St<'_, 'a>, tokens: &[Token], expect_dot: bool)
                     )));
                 }
                 Some(i) => PathMemberKind::Int(i as usize),
+                // nu parses the member as a string, and a bare word with a
+                // `(` in it is an interpolation, not a string: `$x.a(b)` fails.
+                None if strings::is_bare_interpolation(text) => {
+                    return Err(cut(Diagnostic::expected("string", tok.span)
+                        .with_help("a cell-path member with `(` in it must be quoted")));
+                }
                 None => PathMemberKind::String(strings::string_lit(st, tok.span)?.value),
             };
             members.push(PathMember { span: tok.span, kind, optional: false, insensitive: false });
@@ -171,12 +185,13 @@ fn range_operators(text: &str) -> Option<(Option<usize>, usize)> {
 }
 
 /// A range bound must be something `parse_value(Number)` accepts: a number,
-/// a `$` expression or a parenthesised subexpression.
+/// a `$` expression or a parenthesised subexpression, which may carry a cell
+/// path (`(ls).0..5`).
 fn is_range_bound(text: &str) -> bool {
     literal::parse_int(text).is_some()
         || literal::parse_float(text).is_some()
         || text.starts_with('$')
-        || (text.starts_with('(') && text.ends_with(')') && text.len() >= 2)
+        || (text.starts_with('(') && crate::lexer::group_end(text).is_some())
 }
 
 /// `true` if `text` has the shape of a range: `from..to`, `from..<to`,
@@ -218,7 +233,15 @@ pub fn range<'a>(st: St<'_, 'a>, span: Span) -> PResult<Expr<'a>> {
         if start >= end {
             return Ok(None);
         }
-        Ok(Some(Box::new(value::value(st, Span::new(span.start + start, span.start + end), Hint::Number)?)))
+        let bound_span = Span::new(span.start + start, span.start + end);
+        let bound = value::value(st, bound_span, Hint::Number)?;
+        // `(1)abc..5`: nu reads the bound as a bare interpolation, a string,
+        // which the `..` operator then refuses.
+        if let ExprKind::Interpolation(_) = bound.kind {
+            return Err(cut(Diagnostic::message("the `..` operator does not work on a string", bound_span)
+                .with_help("a range bound is a number, a variable or a subexpression")));
+        }
+        Ok(Some(Box::new(bound)))
     };
     let from = bound(0, next_pos.unwrap_or(op_pos))?;
     let next = match next_pos {

@@ -1,0 +1,5 @@
+Block 0..19
+  Pipeline 0..18
+    Alias `x` 0..18
+      Call `FOO=1` 10..18
+        String Bare "ls" 16..18

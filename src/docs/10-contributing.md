@@ -41,7 +41,15 @@ Suppose Nushell gains `unless COND { }`.
    (like `def`), add it to `is_statement_keyword`; if it can be an operand
    (like `if`), add it to `looks_like_value`'s keyword list in `value.rs`
    and to `math_expression`'s `"if" | "match"` check in `expr.rs`. If a
-   `def` may not use the name, add it to `is_parser_keyword`.
+   `def` may not use the name, add it to `is_parser_keyword`. Every keyword
+   is a command with a fixed signature in nu, so at the start of each
+   positional call `boundary_help` (it takes `--help`/`-h`, the first `--`
+   and refuses other flags), fetch the item with `item_or_help` (a missing
+   positional is forgiven after `--help`) and finish with `done`, which
+   turns the statement into the ordinary call nu makes of `kw --help`;
+   `end_of_options` and `help_call` are the helpers behind them. Text that
+   nu accepts and never looks at goes to `st.ignore(span)` rather than into
+   the tree.
 3. `src/ast/visit.rs`: descend into the condition and body in `walk_expr`.
 4. `src/flatten.rs`: the keyword shape is pushed for you from
    `keyword_span()`; visit the condition and call `block_braces` for the body.
@@ -96,8 +104,10 @@ compare with `nu-check --debug file.nu`.
   backtrack error inside `?` becomes a confusing "expected valid syntax".
 * **Block recovery records errors.** A block that fails to parse still
   returns `Ok` with its errors recorded, so never parse a block to find out
-  whether an item is one; decide from the text first (`probe_brace`,
-  `is_range_syntax`, `looks_like_value` are the existing examples).
+  whether an item is one; decide from the text first (`value::brace_shape`,
+  which classifies a `{...}` as `BraceShape::{Empty, ClosureParams, Record,
+  Spread, Other}` the way nu's `parse_brace_expr` probes it, `is_range_syntax`
+  and `looks_like_value` are the existing examples).
 * **Comments are recorded where they are lexed.** If you re-lex an interior
   with `skip_comments: false`, call `st.comments_from(&tokens)` (or handle
   `Comment` tokens) so they are kept; if you lex the same text twice, the

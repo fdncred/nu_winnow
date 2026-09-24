@@ -10,15 +10,18 @@ use crate::lexer::{LexOptions, Token, TokenKind};
 use crate::span::{Span, Spanned};
 
 use super::cellpath::is_identifier;
+use super::statement::check_variable_name;
 use super::value::{self, Hint};
 use super::{St, strings};
 
-/// Parse a `[...]` or `(...)` signature item.
-pub fn parse_signature<'a>(st: St<'_, 'a>, span: Span) -> PResult<Signature<'a>> {
+/// Parse a `[...]` or `(...)` signature item. `external` is set for an
+/// `extern`, whose parameters declare no variables: nu then checks no
+/// reserved names and never parses default values.
+pub fn parse_signature<'a>(st: St<'_, 'a>, span: Span, external: bool) -> PResult<Signature<'a>> {
     let text = st.text(span);
-    let (open, close) = match text.as_bytes().first() {
-        Some(b'[') => ("[", "]"),
-        Some(b'(') => ("(", ")"),
+    let close = match text.as_bytes().first() {
+        Some(b'[') => "]",
+        Some(b'(') => ")",
         _ => return Err(cut(Diagnostic::expected("signature", span))),
     };
     if text.len() < 2 || !text.ends_with(close) {
@@ -27,16 +30,42 @@ pub fn parse_signature<'a>(st: St<'_, 'a>, span: Span) -> PResult<Signature<'a>>
             span.past(),
         )));
     }
-    let _ = open;
-    parse_signature_inner(st, Span::new(span.start + 1, span.end - 1), span)
+    parse_signature_inner(st, Span::new(span.start + 1, span.end - 1), span, external)
 }
 
 /// Parse the parameters in `inner` (the text between the delimiters); `outer`
 /// becomes the signature's span.
-pub fn parse_signature_inner<'a>(st: St<'_, 'a>, inner: Span, outer: Span) -> PResult<Signature<'a>> {
+pub fn parse_signature_inner<'a>(st: St<'_, 'a>, inner: Span, outer: Span, external: bool) -> PResult<Signature<'a>> {
     let tokens = st.lex_span(inner, LexOptions::SIGNATURE).map_err(cut)?;
-    let params = parse_params(st, &tokens).map_err(|e| e.map(|d| d.with_context("signature")))?;
+    let params = parse_params(st, &tokens, external).map_err(|e| e.map(|d| d.with_context("signature")))?;
+    check_params(&params, outer)?;
     Ok(Signature { span: outer, params, io_types: Vec::new(), io_span: None })
+}
+
+/// nu's checks over the finished list: a required parameter after an
+/// optional one and more than one rest parameter are errors.
+fn check_params(params: &[Param<'_>], span: Span) -> PResult<()> {
+    let mut optional_seen = false;
+    let mut rest_seen = false;
+    for p in params {
+        match p.kind {
+            ParamKind::Positional { optional } if optional || p.default.is_some() => optional_seen = true,
+            ParamKind::Positional { .. } if optional_seen => {
+                return Err(cut(Diagnostic::message(
+                    format!("required positional parameter `{}` after an optional parameter", p.name.item),
+                    p.span,
+                )
+                .with_help("move the required parameter before the optional ones")));
+            }
+            ParamKind::Rest if rest_seen => {
+                return Err(cut(Diagnostic::message("multiple rest params", span)
+                    .with_help("a signature can have only one `...rest` parameter")));
+            }
+            ParamKind::Rest => rest_seen = true,
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -48,7 +77,7 @@ enum Mode {
     Default,
 }
 
-fn parse_params<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Vec<Param<'a>>> {
+fn parse_params<'a>(st: St<'_, 'a>, tokens: &[Token], external: bool) -> PResult<Vec<Param<'a>>> {
     let mut params: Vec<Param<'a>> = Vec::new();
     let mut mode = Mode::Arg;
     let items: Vec<&Token> = tokens.iter().filter(|t| t.kind != TokenKind::Eof).collect();
@@ -59,13 +88,14 @@ fn parse_params<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Vec<Param<'a>>>
             TokenKind::Comment => {
                 st.comment(tok.span);
                 if let Some(p) = params.last_mut() {
-                    p.description = Some(Comment { span: tok.span });
+                    p.description.push(Comment { span: tok.span });
                 }
                 continue;
             }
-            TokenKind::Pipe | TokenKind::PipePipe | TokenKind::Semicolon => continue,
+            // nu skips every token that is not an item: pipes, `;`, redirections.
+            TokenKind::Pipe | TokenKind::PipePipe | TokenKind::Semicolon | TokenKind::Redirect(_) => continue,
             TokenKind::Item | TokenKind::Assign(_) => {}
-            _ => return Err(cut(Diagnostic::expected("parameter", tok.span))),
+            TokenKind::Eol | TokenKind::Eof => continue,
         }
         match text {
             ":" => match mode {
@@ -122,7 +152,7 @@ fn parse_params<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Vec<Param<'a>>>
                         }
                         continue;
                     }
-                    params.push(new_param(st, tok)?);
+                    params.push(new_param(st, tok, external)?);
                     mode = Mode::Arg;
                 }
                 Mode::Type => {
@@ -133,6 +163,15 @@ fn parse_params<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Vec<Param<'a>>>
                     }
                     let (ty, completer) = parse_type_with_completer(st, tok.span)?;
                     let Some(p) = params.last_mut() else { unreachable!("checked above") };
+                    if let ParamKind::Flag { .. } = p.kind
+                        && ty.kind == TypeKind::Bool
+                    {
+                        return Err(cut(Diagnostic::message(
+                            "type annotations are not allowed for boolean switches",
+                            tok.span,
+                        )
+                        .with_help("remove the `: bool` type annotation")));
+                    }
                     p.ty = Some(ty);
                     p.completer = completer;
                     p.span = p.span.merge(tok.span);
@@ -144,8 +183,22 @@ fn parse_params<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Vec<Param<'a>>>
                         mode = Mode::Arg;
                         continue;
                     }
-                    let default = value::value(st, tok.span, Hint::Any)?;
+                    if external {
+                        // nu never parses the default values of an `extern` signature.
+                        st.ignore(tok.span);
+                        mode = Mode::Arg;
+                        continue;
+                    }
                     let Some(p) = params.last_mut() else { unreachable!("checked above") };
+                    if let ParamKind::Rest = p.kind {
+                        return Err(cut(Diagnostic::message("rest parameter was given a default value", tok.span)
+                            .with_help("a `...rest` parameter can't have a default value")));
+                    }
+                    // The default is parsed with the declared shape (`[x: int = abc]` is an error).
+                    let default = match &p.ty {
+                        Some(ty) => value::value(st, tok.span, Hint::Typed(&ty.kind))?,
+                        None => value::value(st, tok.span, Hint::Any)?,
+                    };
                     p.default = Some(default);
                     p.span = p.span.merge(tok.span);
                     mode = Mode::Arg;
@@ -153,15 +206,12 @@ fn parse_params<'a>(st: St<'_, 'a>, tokens: &[Token]) -> PResult<Vec<Param<'a>>>
             },
         }
     }
-    let end = items.last().map_or(Span::point(0), |t| t.span.past());
-    match mode {
-        Mode::Type => Err(cut(Diagnostic::expected("type", end))),
-        Mode::Default => Err(cut(Diagnostic::expected("default value", end))),
-        _ => Ok(params),
-    }
+    // Like nu, a `:` or `=` that is not the last token (a comment may follow
+    // it) leaves the list as it is: `[x: # c\n]` is a parameter without a type.
+    Ok(params)
 }
 
-fn new_param<'a>(st: St<'_, 'a>, tok: &Token) -> PResult<Param<'a>> {
+fn new_param<'a>(st: St<'_, 'a>, tok: &Token, external: bool) -> PResult<Param<'a>> {
     let text = st.tok(tok);
     let span = tok.span;
     let base = Param {
@@ -171,8 +221,11 @@ fn new_param<'a>(st: St<'_, 'a>, tok: &Token) -> PResult<Param<'a>> {
         ty: None,
         default: None,
         completer: None,
-        description: None,
+        description: Vec::new(),
     };
+    // A parameter declares a variable, whose name may not be a reserved one
+    // (`in`, `nu`, `env`, `ans`); an extern's parameters declare nothing.
+    let declare = |name: &str, span: Span| if external { Ok(()) } else { check_variable_name(name, span) };
     if let Some(rest) = text.strip_prefix("--").filter(|r| !r.is_empty()) {
         // `--long` or `--long(-s)`
         let (long, short) = match rest.split_once('(') {
@@ -190,10 +243,12 @@ fn new_param<'a>(st: St<'_, 'a>, tok: &Token) -> PResult<Param<'a>> {
                 (long, Some(Spanned::new(c, Span::new(short_start, short_start + c.len_utf8()))))
             }
         };
-        if !is_identifier(&long.replace('-', "_")) {
+        let variable = long.replace('-', "_");
+        if !is_identifier(&variable) {
             return Err(cut(Diagnostic::expected("valid name for this long flag", span)));
         }
         let long_span = Span::new(span.start + 2, span.start + 2 + long.len());
+        declare(&variable, long_span)?;
         return Ok(Param {
             kind: ParamKind::Flag { long: Some(Spanned::new(long, long_span)), short },
             name: Spanned::new(long, long_span),
@@ -205,6 +260,10 @@ fn new_param<'a>(st: St<'_, 'a>, tok: &Token) -> PResult<Param<'a>> {
         let (Some(c), None) = (chars.next(), chars.next()) else {
             return Err(cut(Diagnostic::expected("single-character short flag", span)));
         };
+        // `-.` and `--`: the letter must be an identifier byte.
+        if !is_identifier(short) {
+            return Err(cut(Diagnostic::expected("valid variable name for this short flag", span)));
+        }
         let short_span = Span::new(span.start + 1, span.end);
         return Ok(Param {
             kind: ParamKind::Flag { long: None, short: Some(Spanned::new(c, short_span)) },
@@ -216,56 +275,65 @@ fn new_param<'a>(st: St<'_, 'a>, tok: &Token) -> PResult<Param<'a>> {
         if !is_identifier(name) {
             return Err(cut(Diagnostic::expected("valid variable name for this optional parameter", span)));
         }
-        return Ok(Param {
-            kind: ParamKind::Positional { optional: true },
-            name: Spanned::new(name, Span::new(span.start, span.end - 1)),
-            ..base
-        });
+        let name_span = Span::new(span.start, span.end - 1);
+        declare(name, name_span)?;
+        return Ok(Param { kind: ParamKind::Positional { optional: true }, name: Spanned::new(name, name_span), ..base });
     }
     if let Some(name) = text.strip_prefix("...") {
         if !is_identifier(name) {
             return Err(cut(Diagnostic::expected("valid variable name for this rest parameter", span)));
         }
-        return Ok(Param {
-            kind: ParamKind::Rest,
-            name: Spanned::new(name, Span::new(span.start + 3, span.end)),
-            ..base
-        });
+        let name_span = Span::new(span.start + 3, span.end);
+        declare(name, name_span)?;
+        return Ok(Param { kind: ParamKind::Rest, name: Spanned::new(name, name_span), ..base });
     }
     if !is_identifier(text) {
         return Err(cut(Diagnostic::expected("valid variable name for this parameter", span)));
     }
+    declare(text, span)?;
     Ok(Param { name: Spanned::new(text, span), ..base })
 }
 
-/// Split `type@completer` at the first `@` outside angle brackets.
-fn split_completer(text: &str) -> (usize, Option<usize>) {
-    let mut depth = 0i32;
-    for (i, b) in text.bytes().enumerate() {
-        match b {
-            b'<' => depth += 1,
-            b'>' => depth -= 1,
-            b'@' if depth == 0 => return (i, Some(i + 1)),
-            _ => {}
-        }
-    }
-    (text.len(), None)
-}
-
-/// Parse a type token that may carry a `@completer` suffix.
+/// Parse a type token that may carry a `@completer` suffix. Like nu, the
+/// split is at the first `@` wherever it is (`record<a@b: int>` is then an
+/// unclosed `record<`), and an empty type before the `@` is unknown.
 pub fn parse_type_with_completer<'a>(
     st: St<'_, 'a>,
     span: Span,
 ) -> PResult<(TypeAnnotation<'a>, Option<Spanned<&'a str>>)> {
     let text = st.text(span);
-    let (type_len, completer_start) = split_completer(text);
-    let completer = completer_start.map(|s| Spanned::new(&text[s..], Span::new(span.start + s, span.end)));
-    if type_len == 0 {
-        // `name@completer` without a type
-        return Ok((TypeAnnotation { span: Span::point(span.start), kind: TypeKind::Any }, completer));
+    let (type_text, completer) = match text.find('@') {
+        Some(at) => (&text[..at], Some(Spanned::new(&text[at + 1..], Span::new(span.start + at + 1, span.end)))),
+        None => (text, None),
+    };
+    let ty = parse_type(st, Span::new(span.start, span.start + type_text.len()))?;
+    if let Some(completer) = completer {
+        check_completer(st, completer)?;
     }
-    let ty = parse_type(st, Span::new(span.start, span.start + type_len))?;
     Ok((ty, completer))
+}
+
+/// A completer is the name of a command (bare or quoted) or a list of
+/// values; a subexpression or a record cannot be one. Whether the command
+/// exists is the consumer's business (it may come from a `use`d module).
+fn check_completer(st: St<'_, '_>, completer: Spanned<&str>) -> PResult<()> {
+    let text = completer.item;
+    let not_a_name = || {
+        cut(Diagnostic::message(
+            "the parameter completer must be a string (the name of a command) or a list",
+            completer.span,
+        ))
+    };
+    match text.as_bytes().first() {
+        None => Err(cut(Diagnostic::expected("completer after `@`", completer.span))),
+        Some(b'[') => value::value(st, completer.span, Hint::Any).map(|_| ()),
+        Some(b'$') => Ok(()),
+        Some(b'(' | b'{') => Err(not_a_name()),
+        Some(_) => match value::value(st, completer.span, Hint::String)?.kind {
+            ExprKind::String(_) => Ok(()),
+            _ => Err(not_a_name()),
+        },
+    }
 }
 
 /// Parse a type annotation such as `int`, `list<string>` or `record<a: int>`.
@@ -363,38 +431,52 @@ fn comma_separated_types<'a>(st: St<'_, 'a>, span: Span) -> PResult<Vec<TypeAnno
     tokens.iter().filter(|t| t.kind == TokenKind::Item).map(|t| parse_type(st, t.span)).collect()
 }
 
+/// The fields of `record<a: int, b>`. Like nu: every token must be an item
+/// (a `;` or `|` is not a field name); stray commas are skipped; a name
+/// followed by `:` needs a type token (which may be anything, even `,`:
+/// `record<a:, b: int>` is an unknown type); a name without `:` has type `any`.
 fn named_type_params<'a>(st: St<'_, 'a>, span: Span) -> PResult<Vec<TypeField<'a>>> {
     let tokens = st.lex_span(span, LexOptions::SIGNATURE).map_err(cut)?;
-    let items: Vec<&Token> =
-        tokens.iter().filter(|t| matches!(t.kind, TokenKind::Item | TokenKind::Assign(_))).collect();
+    let items: Vec<&Token> = tokens.iter().filter(|t| t.kind != TokenKind::Eof).collect();
     let mut fields = Vec::new();
     let mut idx = 0;
     while idx < items.len() {
         let name_tok = items[idx];
-        let name_text = st.tok(name_tok);
-        if name_text == "," || name_text == ":" {
-            return Err(cut(Diagnostic::expected("field name", name_tok.span)));
+        if name_tok.kind != TokenKind::Item {
+            return Err(cut(Diagnostic::message("annotation key not string", name_tok.span)
+                .with_help("a field name must be a string")));
         }
-        let name = strings::string_lit(st, name_tok.span)?.value;
-        idx += 1;
-        let ty = if idx < items.len() && st.tok(items[idx]) == ":" {
+        if st.tok(name_tok) == "," {
             idx += 1;
-            let Some(ty_tok) = items.get(idx) else {
-                return Err(cut(Diagnostic::expected("type", name_tok.span.past())));
-            };
-            idx += 1;
-            parse_type(st, ty_tok.span)?
-        } else {
-            TypeAnnotation { span: name_tok.span.past(), kind: TypeKind::Any }
+            continue;
+        }
+        let key = value::value(st, name_tok.span, Hint::String)?;
+        let ExprKind::String(name) = key.kind else {
+            return Err(cut(Diagnostic::message("annotation key not string", name_tok.span)
+                .with_help("a field name must be a string")));
         };
-        fields.push(TypeField { name: Spanned::new(name, name_tok.span), ty });
-        // Fields may be separated by commas, whitespace or newlines.
-        if idx < items.len() && st.tok(items[idx]) == "," {
-            idx += 1;
-        }
+        idx += 1;
+        let ty = match items.get(idx).map(|t| st.tok(t)) {
+            Some(":") => {
+                idx += 1;
+                let Some(ty_tok) = items.get(idx) else {
+                    return Err(cut(Diagnostic::expected("type after colon", items[idx - 1].span)));
+                };
+                idx += 1;
+                parse_type(st, ty_tok.span)?
+            }
+            Some(",") => {
+                idx += 1;
+                TypeAnnotation { span: name_tok.span.past(), kind: TypeKind::Any }
+            }
+            _ => TypeAnnotation { span: name_tok.span.past(), kind: TypeKind::Any },
+        };
+        fields.push(TypeField { name: Spanned::new(name.value, name_tok.span), ty });
     }
     Ok(fields)
 }
+
+use crate::ast::ExprKind;
 
 /// Parse `int -> string` or `[int -> string, nothing -> nothing]` covering `span`.
 pub fn parse_io_types<'a>(st: St<'_, 'a>, span: Span) -> PResult<Vec<IoType<'a>>> {

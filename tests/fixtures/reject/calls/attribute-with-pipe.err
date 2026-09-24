@@ -1,6 +1,6 @@
-error: attributes cannot contain pipelines or redirections
-  --> reject/calls/attribute-with-pipe.nu:1:12
+error: extra positional argument
+  --> reject/calls/attribute-with-pipe.nu:1:14
   |
 1 | @example x | y
-  |            ^
-  = while parsing attribute
+  |              ^
+  = help: `attr example` takes at most 2 positional arguments

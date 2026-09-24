@@ -6,7 +6,7 @@ def --env --wrapped "my cmd" [
   --flag(-f): int = 3
   -s
   --long (-l)
-  ...rest: any
+  ...rest: string
 ]: [int -> string, nothing -> nothing] {
   $a
 }

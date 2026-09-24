@@ -13,7 +13,7 @@ use super::{St, cellpath, literal};
 
 /// `true` for a bare word that Nushell treats as an interpolation because it
 /// contains `(`: `foo(1 + 1)bar`.
-fn is_bare_interpolation(text: &str) -> bool {
+pub fn is_bare_interpolation(text: &str) -> bool {
     !text.starts_with(['\'', '"', '`']) && text.contains('(')
 }
 
@@ -38,7 +38,11 @@ pub fn string_lit<'a>(st: St<'_, 'a>, span: Span) -> PResult<StringLit<'a>> {
             Ok(StringLit { value: literal::unescape(body, span.start + 1).map_err(cut)?, quote: Quote::Double })
         }
         Some(b'\'') => Ok(StringLit { value: Cow::Borrowed(quoted_body(st, span, b'\'')?), quote: Quote::Single }),
-        Some(b'`') => Ok(StringLit { value: Cow::Borrowed(quoted_body(st, span, b'`')?), quote: Quote::Backtick }),
+        // Backticks are trimmed only when the item both starts and ends with
+        // one; `` `a`b `` is the bare word `` `a`b ``, as in nu.
+        Some(b'`') if text.len() >= 2 && text.ends_with('`') => {
+            Ok(StringLit { value: Cow::Borrowed(&text[1..text.len() - 1]), quote: Quote::Backtick })
+        }
         _ => Ok(StringLit::bare(text)),
     }
 }
@@ -47,14 +51,10 @@ pub fn string_lit<'a>(st: St<'_, 'a>, span: Span) -> PResult<StringLit<'a>> {
 ///
 /// Like Nushell, the *last* quote character in the item must be its final
 /// byte (`"a"b` is an error) but quotes in between are kept as text, so
-/// `"a"b"c"` is the string `a"b"c`. Backticks are not checked, only trimmed.
+/// `"a"b"c"` is the string `a"b"c`.
 fn quoted_body<'a>(st: St<'_, 'a>, span: Span, quote: u8) -> PResult<&'a str> {
     let text = st.text(span);
     let bytes = text.as_bytes();
-    if quote == b'`' {
-        let closed = bytes.len() >= 2 && bytes[bytes.len() - 1] == b'`';
-        return Ok(if closed { &text[1..text.len() - 1] } else { &text[1..] });
-    }
     match bytes.iter().rposition(|b| *b == quote) {
         Some(0) | None => Err(cut(Diagnostic::new(
             ErrorKind::Unclosed { delimiter: quote_str(quote), open: Span::new(span.start, span.start + 1) },

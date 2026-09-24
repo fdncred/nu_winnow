@@ -18,6 +18,14 @@ pub fn dump(ast: &Ast<'_>) -> String {
         }
         p.depth -= 1;
     }
+    if !ast.ignored.is_empty() {
+        p.line(format_args!("Ignored ({})", ast.ignored.len()));
+        p.depth += 1;
+        for s in &ast.ignored {
+            p.line(format_args!("{s} {:?}", s.slice(ast.source)));
+        }
+        p.depth -= 1;
+    }
     p.out
 }
 
@@ -123,8 +131,9 @@ impl<'a> Printer<'a> {
                 if let Some(c) = param.completer {
                     let _ = write!(extra, " @{}", c.item);
                 }
-                if let Some(d) = &param.description {
-                    let _ = write!(extra, " desc={:?}", d.body(p.src));
+                if !param.description.is_empty() {
+                    let desc: Vec<&str> = param.description.iter().map(|d| d.body(p.src)).collect();
+                    let _ = write!(extra, " desc={:?}", desc.join("\n"));
                 }
                 p.line(format_args!("Param {kind} `{}` {}{extra}", param.name.item, param.span));
                 if let Some(d) = &param.default {
@@ -403,6 +412,10 @@ impl<'a> Printer<'a> {
                 self.line(format_args!("Def `{}`{flags} {span}", d.name.item));
                 self.nested(|p| {
                     p.signature(&d.signature);
+                    if let Some(params) = &d.body_params {
+                        p.line(format_args!("BodyParams"));
+                        p.nested(|p| p.signature(params));
+                    }
                     p.block("Body", &d.body);
                 });
             }
@@ -412,7 +425,9 @@ impl<'a> Printer<'a> {
             }
             ExprKind::Alias(a) => {
                 self.line(format_args!("Alias `{}` {span}", a.name.item));
-                self.nested(|p| p.expr(&a.value));
+                if let Some(value) = &a.value {
+                    self.nested(|p| p.expr(value));
+                }
             }
             ExprKind::Use(u) => {
                 self.line(format_args!("Use {span}"));
@@ -425,6 +440,10 @@ impl<'a> Printer<'a> {
                             UseMemberKind::List(names) => {
                                 let names: Vec<_> = names.iter().map(|n| n.item.as_ref()).collect();
                                 p.line(format_args!("Members {names:?} {}", m.span));
+                            }
+                            UseMemberKind::Ignored(e) => {
+                                p.line(format_args!("Member (ignored) {}", m.span));
+                                p.nested(|p| p.expr(e));
                             }
                         }
                     }
@@ -470,6 +489,10 @@ impl<'a> Printer<'a> {
                             }
                             p.expr(&arm.body);
                         });
+                    }
+                    if let Some(b) = &m.value_block {
+                        p.line(format_args!("ValueBlock"));
+                        p.nested(|p| p.expr(b));
                     }
                 });
             }

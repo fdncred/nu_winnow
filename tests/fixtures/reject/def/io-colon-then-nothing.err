@@ -1,6 +1,7 @@
-error: expected input/output types after `:`
-  --> reject/def/io-colon-then-nothing.nu:1:9
+error: unclosed delimiter: expected `]`
+  --> reject/def/io-colon-then-nothing.nu:1:10
   |
 1 | def q []: {}
-  |         ^
+  |          ^
+  = note: opened at 1:7
   = while parsing def

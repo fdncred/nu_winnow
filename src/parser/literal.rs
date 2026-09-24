@@ -151,18 +151,29 @@ fn fixed_digits<'i>(n: usize) -> impl Parser<&'i str, &'i str, winnow::error::Co
     take_while(n..=n, |c: char| c.is_ascii_digit())
 }
 
-/// `true` if `text` is a date/time literal Nushell would accept:
-/// `YYYY-MM-DD`, optionally followed by `Thh:mm:ss[.frac]` and optionally a
-/// `Z` or `±hh:mm` offset. Field ranges are checked loosely.
+/// The number of days in a month of the proleptic Gregorian calendar.
+fn days_in_month(year: u32, month: u32) -> u32 {
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
+/// `true` if `text` is a date/time literal Nushell would accept, i.e. what
+/// chrono's RFC 3339 parser takes: `YYYY-MM-DD` (a real calendar date),
+/// optionally followed by `Thh:mm:ss[.frac]` (seconds up to 60 for a leap
+/// second) and optionally a `Z` or `±hh:mm` offset.
 pub fn is_datetime(text: &str) -> bool {
     fn date(i: &mut &str) -> winnow::Result<()> {
-        let year: &str = fixed_digits(4).parse_next(i)?;
-        let _ = year;
+        let year = fixed_digits(4).parse_to::<u32>().parse_next(i)?;
         '-'.parse_next(i)?;
         let month = fixed_digits(2).parse_to::<u32>().verify(|m| (1..=12).contains(m)).parse_next(i)?;
-        let _ = month;
         '-'.parse_next(i)?;
-        let _day = fixed_digits(2).parse_to::<u32>().verify(|d| (1..=31).contains(d)).parse_next(i)?;
+        let _day =
+            fixed_digits(2).parse_to::<u32>().verify(|d| (1..=days_in_month(year, month)).contains(d)).parse_next(i)?;
         Ok(())
     }
     fn time(i: &mut &str) -> winnow::Result<()> {
@@ -191,6 +202,20 @@ pub fn is_datetime(text: &str) -> bool {
     let mut i = text;
     let ok = (date, opt((time, opt(offset)))).parse_next(&mut i).is_ok();
     ok && i.is_empty()
+}
+
+/// Whether a `0x[...]`/`0o[...]`/`0b[...]` word makes a command line a math
+/// expression: like nu, it does unless the brackets hold a pipe, redirection
+/// or assignment token (`0b[1|2]` is then a command name).
+pub fn looks_like_binary(text: &str) -> bool {
+    let Some(prefix) = ["0x[", "0o[", "0b["].into_iter().find(|p| text.starts_with(p)) else { return false };
+    let Some(inner) = text[prefix.len()..].strip_suffix(']') else { return false };
+    match lex(inner, 0, LexOptions::BINARY) {
+        Ok(tokens) => tokens.iter().all(|t| {
+            matches!(t.kind, TokenKind::Item | TokenKind::Eof | TokenKind::Comment | TokenKind::Semicolon | TokenKind::Eol)
+        }),
+        Err(_) => true,
+    }
 }
 
 /// Parse `0x[...]`, `0o[...]` or `0b[...]`. Returns `None` if `text` does not
@@ -259,82 +284,54 @@ fn binary_inner<'a>(
 
 /// Decode the escape sequences of a double-quoted string body.
 ///
-/// `base` is the absolute offset of `text`, used for error spans.
+/// Like nu, `\xHH` contributes a raw byte and the result must be valid UTF-8
+/// as a whole: `"\xC3\xA9"` is `é`, `"\xC3"` is an error. `base` is the
+/// absolute offset of `text`, used for error spans.
 pub fn unescape(text: &str, base: usize) -> Result<Cow<'_, str>, Diagnostic> {
     if !text.contains('\\') {
         return Ok(Cow::Borrowed(text));
     }
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.char_indices().peekable();
-    while let Some((idx, c)) = chars.next() {
-        if c != '\\' {
-            out.push(c);
+    let invalid = |message: String, span: Span| Diagnostic::new(ErrorKind::InvalidLiteral { kind: "string", message }, span);
+    let bytes = text.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut idx = 0;
+    while idx < bytes.len() {
+        if bytes[idx] != b'\\' {
+            out.push(bytes[idx]);
+            idx += 1;
             continue;
         }
-        let Some((_, esc)) = chars.next() else {
-            return Err(Diagnostic::new(
-                ErrorKind::InvalidLiteral { kind: "string", message: "incomplete escape sequence after `\\`".into() },
-                Span::new(base + idx, base + text.len()),
-            ));
+        let Some(&esc) = bytes.get(idx + 1) else {
+            return Err(invalid("incomplete escape sequence after `\\`".into(), Span::new(base + idx, base + text.len())));
         };
         let simple = match esc {
-            '"' => '"',
-            '\'' => '\'',
-            '\\' => '\\',
-            '/' => '/',
-            '(' => '(',
-            ')' => ')',
-            '{' => '{',
-            '}' => '}',
-            '$' => '$',
-            '^' => '^',
-            '#' => '#',
-            '|' => '|',
-            '~' => '~',
-            ' ' => ' ',
-            'a' => '\u{07}',
-            'b' => '\u{08}',
-            'e' => '\u{1b}',
-            'f' => '\u{0c}',
-            'n' => '\n',
-            'r' => '\r',
-            't' => '\t',
-            '0' => '\0',
-            'x' => {
-                let start = idx + 2;
-                let hex = text.get(start..start + 2).filter(|h| h.chars().all(|c| c.is_ascii_hexdigit()));
+            b'"' | b'\'' | b'\\' | b'/' | b'(' | b')' | b'{' | b'}' | b'$' | b'^' | b'#' | b'|' | b'~' | b' ' => esc,
+            b'a' => 0x07,
+            b'b' => 0x08,
+            b'e' => 0x1b,
+            b'f' => 0x0c,
+            b'n' => b'\n',
+            b'r' => b'\r',
+            b't' => b'\t',
+            b'0' => 0,
+            b'x' => {
+                let hex = text.get(idx + 2..idx + 4).filter(|h| h.bytes().all(|b| b.is_ascii_hexdigit()));
                 let Some(hex) = hex else {
-                    return Err(Diagnostic::new(
-                        ErrorKind::InvalidLiteral {
-                            kind: "string",
-                            message: "incomplete hex escape '\\xHH', expected 2 hex digits".into(),
-                        },
+                    return Err(invalid(
+                        "incomplete hex escape '\\xHH', expected 2 hex digits".into(),
                         Span::new(base + idx, base + text.len().min(idx + 4)),
                     ));
                 };
-                let byte = u8::from_str_radix(hex, 16).expect("validated hex");
-                if byte > 0x7f {
-                    return Err(Diagnostic::new(
-                        ErrorKind::InvalidLiteral {
-                            kind: "string",
-                            message: format!("invalid hex escape '\\x{hex}', not valid UTF-8; use '\\u{{{hex}}}'"),
-                        },
-                        Span::new(base + idx, base + idx + 4),
-                    ));
-                }
-                chars.next();
-                chars.next();
-                byte as char
+                out.push(u8::from_str_radix(hex, 16).expect("validated hex"));
+                idx += 4;
+                continue;
             }
-            'u' => {
+            b'u' => {
                 let rest = &text[idx + 2..];
                 let close = rest.strip_prefix('{').and_then(|r| r.find('}'));
                 let Some(close) = close else {
-                    return Err(Diagnostic::new(
-                        ErrorKind::InvalidLiteral {
-                            kind: "string",
-                            message: "incomplete unicode escape '\\u{...}', missing closing '}'".into(),
-                        },
+                    return Err(invalid(
+                        "incomplete unicode escape '\\u{...}', missing closing '}'".into(),
                         Span::new(base + idx, base + text.len().min(idx + 3)),
                     ));
                 };
@@ -342,34 +339,32 @@ pub fn unescape(text: &str, base: usize) -> Result<Cow<'_, str>, Diagnostic> {
                 let ch =
                     u32::from_str_radix(hex, 16).ok().filter(|_| (1..=6).contains(&hex.len())).and_then(char::from_u32);
                 let Some(ch) = ch else {
-                    return Err(Diagnostic::new(
-                        ErrorKind::InvalidLiteral {
-                            kind: "string",
-                            message: format!(
-                                "invalid unicode escape '\\u{{{hex}}}', must be 1-6 hex digits, max codepoint 0x10FFFF"
-                            ),
-                        },
+                    return Err(invalid(
+                        format!("invalid unicode escape '\\u{{{hex}}}', must be 1-6 hex digits, max codepoint 0x10FFFF"),
                         Span::new(base + idx, base + idx + 3 + close),
                     ));
                 };
-                for _ in 0..close + 2 {
-                    chars.next();
-                }
-                ch
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                idx += 3 + close + 1;
+                continue;
             }
-            other => {
-                return Err(Diagnostic::new(
-                    ErrorKind::InvalidLiteral {
-                        kind: "string",
-                        message: format!("unrecognized escape sequence `\\{other}`"),
-                    },
+            _ => {
+                let other = text[idx + 1..].chars().next().unwrap_or('\\');
+                return Err(invalid(
+                    format!("unrecognized escape sequence `\\{other}`"),
                     Span::new(base + idx, base + idx + 1 + other.len_utf8()),
                 ));
             }
         };
         out.push(simple);
+        idx += 2;
     }
-    Ok(Cow::Owned(out))
+    match String::from_utf8(out) {
+        Ok(s) => Ok(Cow::Owned(s)),
+        Err(_) => Err(invalid("the string is not valid UTF-8 after decoding its escapes".into(), Span::new(base, base + text.len()))
+            .with_help("`\\xHH` escapes must form UTF-8 sequences; use `\\u{...}` for a code point")),
+    }
 }
 
 /// Parse a raw string `r#'...'#`. The lexer guarantees the delimiters balance.
@@ -469,5 +464,25 @@ mod tests {
         assert!(unescape(r"\x4", 0).is_err());
         assert!(unescape(r"\u{110000}", 0).is_err());
         assert!(unescape(r"abc\", 0).is_err());
+        // Hex escapes are bytes; the whole string must be UTF-8.
+        assert_eq!(unescape(r"\xC3\xA9", 0).unwrap(), "é");
+        assert!(unescape(r"\xC3", 0).is_err());
+        assert!(unescape(r"\xff", 0).is_err());
+    }
+
+    #[test]
+    fn calendar_dates() {
+        assert!(is_datetime("2024-02-29"));
+        assert!(!is_datetime("2023-02-29"));
+        assert!(!is_datetime("2023-02-30"));
+        assert!(!is_datetime("2024-04-31"));
+        assert!(!is_datetime("2100-02-29"));
+        assert!(is_datetime("2000-02-29"));
+        assert!(is_datetime("2024-01-02T23:59:60"));
+        assert!(!is_datetime("2024-01-02T23:59:61"));
+        assert!(!is_datetime("2024-01-02T03:04:05+24:00"));
+        assert!(is_datetime("2024-01-02t03:04:05z"));
+        assert!(is_datetime("2024-01-02T03:04:05.1234567890"));
+        assert!(!is_datetime("2024-01-02T03:04"));
     }
 }

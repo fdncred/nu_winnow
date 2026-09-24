@@ -23,8 +23,17 @@ Files: `src/ast/mod.rs`, `src/ast/visit.rs`, `src/flatten.rs`, `src/pretty.rs`.
   hold their value; units hold the number and the unit; datetimes keep their
   text.
 * **Comments.** `Ast::comments` lists all of them; pipelines carry
-  `leading_comments` and `trailing_comments`; parameters carry a
-  `description`.
+  `leading_comments` and `trailing_comments`; parameters carry their
+  `description` comments (a `Vec<Comment>`, in source order, as nu joins
+  several with `\n`).
+* **Ignored text.** `Ast::ignored` lists the spans nu-parser accepts and then
+  never looks at: a redirection inside a list (`[a o> b]` is `["a"]`), the
+  second brace item of a `def` or `extern` signature (`def f [] {} {}`), an
+  `extern` default-value token, the extra items and the redirection of
+  `export-env`, dropped `use` members (`use std [1 2]`), list-pattern items
+  after the rest (`[1 ..$r 2]`) and a consumed `--` marker. The parser
+  records them with `St::ignore`; the tree holds nothing for them, so a
+  consumer that wants to warn about dead text has the spans.
 * **Borrowing.** `Ast<'a>` borrows the source. Identifiers are `&'a str`,
   strings `Cow<'a, str>` (owned only when unescaping changed something),
   multi-word command names `Cow<'a, str>` (owned only when joined).
@@ -48,14 +57,42 @@ The `ExprKind` variants, grouped as in the source:
 
 Supporting types: `Signature`/`Param`/`ParamKind`/`TypeAnnotation`/`TypeKind`/
 `IoType`, `Pattern`/`PatternKind`/`MatchArm`, `Arg`/`Flag`/`ExternalArg`,
-`Redirection`/`RedirectTarget`, `UseMember`, `Handler`/`HandlerKind`,
-`Operator` (with `precedence`, `as_str`, `from_spelling`).
+`Redirection`/`RedirectTarget`, `UseMember`/`UseMemberKind`,
+`Handler`/`HandlerKind`, `Operator` (with `precedence`, `as_str`,
+`from_spelling`).
 
-Things that are deliberately *not* decided in the tree, because nu needs a
-signature for them: whether `--flag value` binds the value (a `Flag` with
-`value: None` followed by a `Positional`); whether a bare word is a cell path
-or a glob (it is a `String` with `Quote::Bare`); whether a bare head is
-internal or external (always `Call`; only `^` gives `ExternalCall`).
+Fields that record what nu makes of an unusual spelling, so that the tree
+says the same thing nu-parser's does:
+
+* `Def::body_params`: a body written `{|x| ... }` parses (nu parses every def
+  body as a closure); the parameters are kept here and the signature wins.
+* `Match::value_block`: a closure, a record, a variable or a subexpression
+  where the arms should be (`match 1 {|x| }`, `match 1 {a: 1}`, `match 1 $x`)
+  is accepted by nu and fails at run time; it is kept here and `arms` is
+  empty.
+* `UseMemberKind::Ignored`: a `use` member nu drops without a look (a
+  variable, a number).
+* `Alias::value` is `None` only for `export alias x =`, which nu accepts
+  because its length check counts the `export` word.
+
+Things that are deliberately *not* decided in the tree, because nu needs
+more than the text for them (`grammar/grammar.md` sections 8 and 9.4 list
+them in full): the signatures of ordinary commands, so whether `--flag
+value` binds the value (a `Flag` with `value: None` followed by a
+`Positional`), whether `-1` is a flag or a number, and whether a positional
+has the right shape or count; whether a bare word is a cell path or a glob
+(it is a `String` with `Quote::Bare`); whether a bare head is internal or
+external (always `Call`; only `^` gives `ExternalCall`; with a command table
+configured, an unknown head in an assignment rhs is refused as nu does);
+spread validity; constant evaluation (defaults, completers, match value
+patterns, `use` and `source` arguments); whether a completer's or an
+attribute's command exists; types; module, file, overlay and plugin
+resolution; variable existence. The keyword commands that nu parses by
+signature (`hide`, `source`, `source-env`, `run`, `overlay *`, `plugin use`)
+and the built-in attributes *are* checked here
+(`statement::check_fixed_signature`), as are reserved variable names,
+`RequiredAfterOptional`, `MultipleRestParams`, defaults against their
+declared type and duplicate definitions in a block.
 
 ## The visitor
 
@@ -98,7 +135,9 @@ syntax highlighters consume (it corresponds to nu-parser's `flatten_block`).
 Leaf nodes map to one shape each; containers emit their delimiters and
 punctuation as the *gaps* between their children (`Flattener::gaps`), so
 the brackets of a list are `FlatShape::List` and the `:` of a record entry is
-`FlatShape::Record`. Comments are added at the end.
+`FlatShape::Record`. Comments and the `Ast::ignored` spans
+(`FlatShape::Ignored`) are cut out of whatever shape they fall inside and
+added at the end; a def body's `body_params` are flattened like a closure's.
 
 ```rust
 use nu_winnow_parser::{parse, flatten::{flatten, FlatShape}};
@@ -117,10 +156,12 @@ assert_eq!(shapes.last().unwrap(), &("# c", FlatShape::Comment));
 ## `pretty`
 
 `pretty::dump(&Ast)` prints an indented tree with one node per line and the
-span of each node; `dump_expr` does the same for one expression. It is what
-`examples/parse.rs` prints by default and what `tests/nufmt.rs` uses (with
-spans stripped) to prove that formatting does not change program structure.
-When you add a node, add a line to `Printer::expr` so it shows up.
+span of each node, followed by an `Ignored (n)` section listing
+`Ast::ignored` when it is not empty; `dump_expr` does the same for one
+expression. It is what `examples/parse.rs` prints by default and what
+`tests/nufmt.rs` uses (with spans stripped) to prove that formatting does not
+change program structure. When you add a node, add a line to `Printer::expr`
+so it shows up.
 
 ## Consumers in this repository
 
