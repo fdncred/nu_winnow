@@ -27,6 +27,7 @@ decision, not a gap. A `; here: none` annotation, or a rule marked
 { x }                       zero or more
 ( x )                       grouping
 1*x                         one or more; N*x exactly N
+x - y                       x except y (ISO 14977 exception; used for name restrictions)
 <words with spaces>         a class described in words, not a nonterminal
 ; ...                       a comment; prose describes character classes
                             and side conditions the notation cannot express
@@ -52,72 +53,18 @@ Two facts about nu-parser shape everything below and are easy to forget:
    (`1kb` is a filesize before it could be a string; `0x[zz]` is an error and
    never a string), the order is stated, because it decides what the text means.
 
-### 0.1 Character classes and shared vocabulary
-
-Names used by several sections, defined once here. Nushell source is bytes;
-"byte" means one byte of UTF-8.
-
-```bnf
-<digit>           ::= "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
-<ascii-digit>     ::= <digit>
-<ascii-letter>    ::= <a byte in "A".."Z" or "a".."z">
-<digit-2>         ::= "0" | "1"
-<digit-8>         ::= <digit-2> | "2" | "3" | "4" | "5" | "6" | "7"
-<digit-10>        ::= <digit>
-<digit-16>        ::= <digit> | "a" | "b" | "c" | "d" | "e" | "f" | "A" | "B" | "C" | "D" | "E" | "F"
-<hex>             ::= <digit-16>
-<radix-digit>     ::= <digit-2> | <digit-8> | <digit-16>      ; the digits of the literal's own radix
-<char>            ::= <one UTF-8 encoded character>
-<short-char>      ::= <char>                 ; for <short-flag-param> it must also be an <identifier-byte>
-<any-chars>       ::= { <any byte> }
-<additional-whitespace> ::= <the bytes the construct being lexed treats as whitespace (1.4)>
-<bare-char>       ::= <any byte the lexer lets into an item in the current context (1.3)>
-<dq-char>         ::= <any byte except "\">
-<dq-text>         ::= { <dq-char> | <escape> }                ; text between the "(...)" parts of $"..."
-<sq-text>         ::= { <any byte except "'"> }
-<bare-text>       ::= { <bare-char> }                         ; text between the "(...)" parts of a bare word
-<bare-glob>       ::= 1*<bare-char>                           ; an external word with no quote, paren or backtick
-<shebang>         ::= "#!" { <any byte except "\n"> }
-<word>            ::= <bare-word>                             ; one unquoted item (5.6)
-<unit>            ::= <filesize-unit> | <duration-unit>
-
-; Kinds of item, named by their first byte (each is one <item>, 1.3).
-<var-item>        ::= <dollar-expr>                           ; starts with "$" (5.9)
-<paren-item>      ::= <paren-expr>                            ; starts with "(" (5.12)
-<bracket-item>    ::= <bracket-expr>                          ; starts with "[" (5.1)
-<brace-item>      ::= <brace-expr>                            ; starts with "{" (5.13)
-<item-rest>       ::= <the text of an item after its first byte>
-
-; Bodies of bracketed items (the text between the delimiters).
-<list-body>       ::= { <list-sep> } { <list-item> { <list-sep> } }
-<list-or-table-body> ::= <the interior of a list-or-table item (5.14)>
-<record-body>     ::= { <record-sep> } { <record-entry> { <record-sep> } }
-
-; Names used across sections.
-<expression>      ::= <pipeline-element>                      ; parse_expression (3.1)
-<expression-of-one-item> ::= <expression>                     ; restricted to exactly one item
-<value-of-shape>  ::= <value>                                 ; parsed with the SyntaxShape of its argument position (consumer)
-<external-arg>    ::= <ext-arg>                               ; (4)
-<keyword-word>    ::= <the keyword a SyntaxShape::Keyword names: "in", "else", "catch", "finally", "as">
-<builtin-head>    ::= <call-head>                             ; must name a built-in command
-<filepath>        ::= <string>                                ; a file path (semantic)
-<field-token>     ::= <bare-word> | <double-quoted> | <single-quoted> | <backtick-quoted>   ; text taken verbatim
-<where-expr>      ::= <where>                                 ; (6.6, 7.7)
-<run-expr>        ::= <call>                                  ; "run" parsed as an ordinary call
-<statement-in-pipeline-error> ::= <a head from the pipeline-forbidden-head list (6.1)>
-```
-
 ## 1. Lexical layer
 
 ### 1.1 Layout
 
 ```bnf
-<source-file>     ::= [ <shebang> ] <block-tokens>
-; a leading "#!" line is an ordinary comment to the lexer
+<source-file>     ::= [ <shebang> ] <token-stream>
+; a leading "#!" line is an ordinary comment to the lexer; the lite parse (2)
+; groups the token stream into <block-tokens>
 ; nu: lex.rs:1075 (comment at token start)
 ; here: src/parser/mod.rs::parse_source (records `shebang`)
 
-<whitespace>      ::= " " | "\t" | <additional-whitespace>
+<whitespace>      ::= " " | "\t" | <carriage-return> | <additional-whitespace>
 ; <additional-whitespace> depends on the construct being lexed (1.4)
 ; nu: lex.rs:1100 (skipped between tokens), lex.rs:63 (terminates an item)
 ; here: src/lexer.rs::skip_whitespace, scan_item (is_terminator)
@@ -146,8 +93,10 @@ Names used by several sections, defined once here. Nushell source is bytes;
 ### 1.2 Tokens
 
 ```bnf
+<token-stream>    ::= { <token> }
 <token>           ::= <item> | <pipe> | <pipe-pipe> | <semicolon> | <eol>
                     | <comment> | <assignment-op> | <redirection-op>
+                    | <bashism>                      ; always an error
 ; nu: lex.rs:963 lex_internal, lex.rs:10 TokenContents
 ; here: src/lexer.rs::TokenKind, token
 
@@ -199,7 +148,7 @@ Names used by several sections, defined once here. Nushell source is bytes;
 
 ```bnf
 <item>            ::= 1*<item-part>
-<item-part>       ::= <plain-byte> | <quoted-run> | <raw-string> | <bracketed-run>
+<item-part>       ::= <plain-byte> | <quoted-run> | <interp-quoted-run> | <raw-string> | <bracketed-run>
 ; An item runs until, at bracket depth zero, a terminator byte is met: " " "\t"
 ; "\n" "\r" "|" ";" or any byte in the construct's additional whitespace or
 ; special tokens (1.4). Quotes and brackets suspend termination. An empty item is
@@ -283,6 +232,7 @@ this crate's `LexOptions` constants carry the same sets.
 
 ```bnf
 <block-tokens>    ::= { <separator> } [ <pipeline> { 1*<separator> <pipeline> } ] { <separator> }
+; the lite parse of a <token-stream> (1.2)
 <separator>       ::= <eol> | <semicolon> | <comment-line>
 <comment-line>    ::= <comment> <eol>
 ; Comment lines directly above a command (no blank line between) are its leading
@@ -291,7 +241,9 @@ this crate's `LexOptions` constants carry the same sets.
 ; nu: lite_parser.rs:219 lite_parse, 466-487; parse_pipelines.rs:129 parse_block
 ; here: src/parser/block.rs::parse_block
 
-<pipeline>        ::= [ <pipe> ] <command> { <pipe-continuation> <command> }
+<pipeline>        ::= <lite-pipeline> | <parsed-pipeline>
+; the same text seen as tokens (here) and after its items are parsed (2.1)
+<lite-pipeline>   ::= [ <pipe> ] <command> { <pipe-continuation> <command> }
 ; A leading "|" yields an empty first command that is dropped (`( | str join)`).
 ; Two pipes in a row (`a | | b`) likewise drop the empty command.
 ; nu: lite_parser.rs:451, LitePipeline::push
@@ -309,8 +261,7 @@ this crate's `LexOptions` constants carry the same sets.
 ; here: src/parser/block.rs::skip_pipe_continuation, pipe_ahead (absorb any
 ;       number of Eol/Comment: one pipeline) ; DIFF 40
 
-<trailing-pipe-rule>
-; A pipeline whose last non-comment token is "|" (skipping ([Comment]+ Eol) pairs
+; The trailing-pipe rule: a pipeline whose last non-comment token is "|" (skipping ([Comment]+ Eol) pairs
 ; from the end) is UnexpectedEof("pipeline missing end"). So `ls |`, `ls | # c`
 ; and `ls |\n# c` (no final newline) are errors; `ls |\n`, `ls |\n\n`,
 ; `ls | # c\n` and `ls |\n# c\n` are not.
@@ -433,12 +384,13 @@ this crate's `LexOptions` constants carry the same sets.
 ; here: src/parser/expr.rs::parse_expression, src/parser/block.rs::is_statement_only,
 ;       is_statement_call ; DIFF 10, 11, 12
 
-<math-expression-like> ::= "true" | "false" | "null" | "not" | "if" | "match"
-                    | "r#" ...
-                    | ( "(" | "{" | "[" | "$" | "\"" | "'" | "-" ) ...
-                    | <number> | <filesize> | <duration> | <datetime>
-                    | <binary-literal>                 ; even one with invalid digits
-                    | <range>
+; An item is math-expression-like when it is one of:
+;   "true" | "false" | "null" | "not" | "if" | "match"
+;   | "r#" ...
+;   | ( "(" | "{" | "[" | "$" | "\"" | "'" | "-" ) ...
+;   | <number> | <filesize> | <duration> | <datetime>
+;   | <binary-literal>                 ; even one with invalid digits
+;   | <range>
 ; the literal probes are the section 5 parsers run speculatively
 ; nu: parse_expressions.rs:38 is_math_expression_like
 ; here: src/parser/value.rs::looks_like_value
@@ -449,13 +401,13 @@ this crate's `LexOptions` constants carry the same sets.
 ```bnf
 <math-expression> ::= <keyword-expression>
                     | <operand> { <operator> <operand-or-keyword> }
-<keyword-expression> ::= ( "if" | "match" ) 1*<item>
+<keyword-expression> ::= <if> | <match>                 ; (6.6)
 ; a leading "if"/"match" hands ALL remaining items to parse_call (6.5); alone it
 ; is Expected("expression")
 <operand>         ::= { "not" } <value>
 ; "not" may repeat; "not" with nothing after it is Expected("expression")
 <operand-or-keyword> ::= <operand>
-                    | ( "if" | "match" ) 1*<item>      ; takes all remaining items
+                    | <if> | <match>                   ; takes all remaining items
 ; An operator with no operand after it is IncompleteMathExpression.
 ; Folding: a stack that grows while precedence rises and collapses while it falls
 ; or stays level; "**" never collapses on equal precedence (right associative);
@@ -500,7 +452,7 @@ Precedence (nu-protocol `ast/operator.rs:256`; higher binds tighter):
 
 ```bnf
 <assignment>      ::= <assign-lhs> <assignment-op> <assign-rhs>
-<assign-lhs>      ::= <pipeline-element>        ; re-parsed with parse_expression
+<assign-lhs>      ::= <full-cell-path>          ; re-parsed with parse_expression; must come out a FullCellPath
 <assign-rhs>      ::= <block-tokens>            ; the absorbed tail (2), re-lexed and
                                                 ; parsed as a block
 ; The operator is the FIRST assignment-op item. Empty lhs / rhs are errors.
@@ -518,14 +470,20 @@ Precedence (nu-protocol `ast/operator.rs:256`; higher binds tighter):
 ## 4. Calls
 
 ```bnf
-<call>            ::= <external-call> | <sigil-call> | <internal-call>
+<call>            ::= <external-call> | <sigil-call> | <keyword-command> | <internal-call>
 ; nu: parse_calls.rs:1588 parse_call
 ; here: src/parser/expr.rs::parse_call
+
+<keyword-command> ::= <if> | <match> | <while> | <loop> | <try> | <return> | <break> | <continue>
+; ordinary declared commands whose signatures use keyword and block shapes (6.6);
+; nu parses them with parse_call, this crate in statement.rs::keyword_or_call
+; nu: nu-cmd-lang core_commands signatures; parse_calls.rs:947 parse_internal_call
+; here: src/parser/statement.rs::keyword_or_call
 
 <external-call>   ::= "^" <ext-head> { <ext-arg> }
 <ext-head>        ::= <var-item> | <paren-item>       ; parsed as an expression
                     | <ext-string>
-                    | ""                              ; `^` alone parses, fails at run time
+                    | <the empty string>              ; `^` alone parses, fails at run time
 <ext-arg>         ::= "..." ( <bracket-item> | <var-item> | <paren-item> )   ; spread
                     | <var-item> | <paren-item> | <bracket-item> | <brace-item>
                     | <ext-string>
@@ -565,7 +523,7 @@ Precedence (nu-protocol `ast/operator.rs:256`; higher binds tighter):
 ;       subcommand expansion: consumer)
 
 <args>            ::= { <arg> }
-<arg>             ::= <long-flag> | <short-flags> | "--" | <spread-arg> | <positional>
+<arg>             ::= <long-flag> | <short-flags> | "--" | <spread-arg> | <keyword-arg> | <positional>
 ; nu: parse_calls.rs:947 parse_internal_call
 ; here: src/parser/expr.rs::parse_args
 
@@ -635,8 +593,8 @@ Each rule describes the text of one item.
                     | <float>                  ; Float
                     | <int> | <float>          ; Number (int first)
                     | <duration> | <filesize> | <datetime> | <range> | <binary>
-                    | "null"                   ; Nothing
-                    | "true" | "false"         ; Boolean
+                    | <nothing>                ; Nothing
+                    | <bool>                   ; Boolean
                     | <string>                 ; String, Filepath, Directory, GlobPattern:
                                                ; but NOT "true", "false" or "null"
                     | <cell-path-literal-body>  ; CellPath (members without "$.")
@@ -647,7 +605,7 @@ Each rule describes the text of one item.
 ;       Signature}; the other shapes arise only from signatures (consumer).
 ;       Hint::String does not refuse "true"/"false"/"null" ; DIFF 17
 
-<any-value>       ::= "null" | "true" | "false"
+<any-value>       ::= <nothing> | <bool>
                     | <binary>       ; 1st: only "0x["/"0o["/"0b[" prefixes; bad digit = hard error
                     | <range>        ; 2nd: fails softly when not range-shaped
                     | <filesize>     ; 3rd: unit suffix with a bad number = hard error
@@ -690,7 +648,7 @@ Each rule describes the text of one item.
 ### 5.3 Filesize and duration
 
 ```bnf
-<unit-value>      ::= <unit-number> <unit>
+; a unit value is <unit-number> followed by a filesize or duration unit:
 <unit-number>     ::= ( <digit> | "." <digit> | "-" <digit> ) <any-chars>
 ; the first two bytes gate the attempt; the text before the unit, minus "_", must
 ; then parse as f64 ("1e3kb", ".5kb", "-3sec", "1_000kb" are fine; "1..2sec" is the
@@ -762,7 +720,7 @@ Each rule describes the text of one item.
 <backtick-quoted> ::= "`" { <byte except "`"> } "`"      ; no escapes; NOT checked for
                                                           ; trailing text: `a`b is the
                                                           ; literal string `a`b
-; nu: parse_literals.rs:1921 check_string_no_trailing_tokens (only " and ')
+; nu: parse_literals.rs:1921 check_string_no_trailing_tokens (only the double and the single quote)
 ; here: src/parser/strings.rs::quoted_body ; DIFF 32 (backtick value)
 
 <escape>          ::= "\" ( "\"" | "'" | "\" | "/" | "(" | ")" | "{" | "}" | "$" | "^"
@@ -1000,9 +958,9 @@ Vocabulary: `<expression>` is a `<pipeline-element>` (3.1); `<block>` is a
 ;       export-env/attributes/for at any position), is_statement_call (source/hide/
 ;       overlay/plugin use only at index > 0) ; DIFF 10, 11, 12
 
-<redirect-forbidden> ::= def | extern | alias | use | module | for | source | source-env
-                    | run | hide | overlay* | plugin use | export* | export-env
-; a redirection on these is RedirectingBuiltinCommand. `let x = ls o> f` is not an
+; Redirections are refused on: def, extern, alias, use, module, for, source,
+; source-env, run, hide, overlay*, plugin use, export*, export-env.
+; A redirection on these is RedirectingBuiltinCommand. `let x = ls o> f` is not an
 ; error because the redirection is absorbed into the rhs pipeline.
 ; nu: redirecting_builtin_error call sites in parse_def.rs, parse_alias.rs,
 ;     parse_module.rs, parse_source.rs, parse_expressions.rs:1801,1817
@@ -1027,8 +985,7 @@ Vocabulary: `<expression>` is a `<pipeline-element>` (3.1); `<block>` is a
 ; nu: parse_def.rs:89, parse_alias.rs:144
 ; here: src/parser/statement.rs::check_definition_name
 
-<predeclaration>
-; before a block is parsed, every single-command pipeline of the form
+; Predeclaration: before a block is parsed, every single-command pipeline of the form
 ; [ "export" ] ( "def" | "extern" ) { "--flag" } <name> ... "[" | "(" declares <name>,
 ; so calls to commands defined later in the file resolve
 ; nu: parse_def.rs:52 parse_def_predecl
@@ -1062,7 +1019,7 @@ Vocabulary: `<expression>` is a `<pipeline-element>` (3.1); `<block>` is a
 ; nu: parse_def.rs:321 parse_def (via parse_internal_call)
 ; here: src/parser/statement.rs::def_stmt, def_flags (before or after the name)
 
-<def-name>        ::= <string>                 ; bare or quoted (multi-word)
+<def-name>        ::= <string> - ( <parser-keyword> | <bad-definition-name> )   ; bare or quoted (multi-word)
 ; must be a string item: `def $x`, `def (foo)`, `def [foo]` are errors ("no space
 ; between name and parameters" for "(" / "["); `def foo[]` is the same error
 ; nu: parse_def.rs:958 detect_params_in_name; SyntaxShape::String
@@ -1123,7 +1080,7 @@ Vocabulary: `<expression>` is a `<pipeline-element>` (3.1); `<block>` is a
 ; nu: parse_module.rs:1084 parse_use; parse_signatures.rs:20 parse_import_pattern
 ; here: src/parser/statement.rs::use_stmt ; DIFF 19, DIFF 49
 
-<module>          ::= "module" <module-name> [ <block> ]
+<module>          ::= "module" <module-name> [ "{" <module-body> "}" ]
 <module-name>     ::= <string>                 ; a "{...}" name is a type error
 ; nu: parse_module.rs:868 parse_module
 ; here: src/parser/statement.rs::module_stmt (Hint::String accepts a record) ; DIFF 20
@@ -1149,7 +1106,7 @@ Vocabulary: `<expression>` is a `<pipeline-element>` (3.1); `<block>` is a
 ; here: src/parser/statement.rs::export_env_stmt (extra items rejected, deliberate) ; DIFF 52
 
 <hide>            ::= "hide" <string> [ <member> ]             ; module or single decl
-<hide-env>        ::= "hide-env" [ "--ignore-errors" | "-i" ] { <string> }
+; hide-env [--ignore-errors | -i] { <string> } is an ordinary command
 <source>          ::= "source" ( <filepath> | "null" )
 <source-env>      ::= "source-env" ( <string> | "null" )
 <run>             ::= "run" ( <filepath> | "null" ) { <value> } [ "--full-reparse" | "-f" ]
@@ -1228,8 +1185,7 @@ Vocabulary: `<expression>` is a `<pipeline-element>` (3.1); `<block>` is a
 ; nu: parse_source.rs:527 parse_where, 472 parse_where_expr
 ; here: src/parser/statement.rs::where_stmt
 
-<collect>         ::= "collect" [ <closure> ] [ "--keep-env" ]
-; an ordinary command; nu marks it a keyword only for `$in` handling
+; collect [<closure>] [--keep-env] is an ordinary command; nu marks it a keyword only for `$in` handling
 ; here: ordinary Call
 ```
 
@@ -1337,8 +1293,7 @@ MultipleRestParams, reserved names `in`, `nu`, `env`, `ans` (skipped for
 ; nu: parse_shape_specs.rs:20 parse_shape_name, 13 parse_type
 ; here: src/parser/signature.rs::parse_type, generic_type (same list, same error)
 
-<generic-params>  ::= "<" ... ">"
-; split at the FIRST "<"; the token must END with ">" (a ">" elsewhere is "Extra
+; The "<" ... ">" of a generic type is split at the FIRST "<"; the token must END with ">" (a ">" elsewhere is "Extra
 ; characters", none is Unclosed ">")
 ; nu: parse_shape_specs.rs:209 split_generic_params
 ; here: src/parser/signature.rs::generic_type
@@ -1628,3 +1583,58 @@ sigil calls, `..=`, `has`/`not-has`, raw strings, the `external_arg` type,
 - A fixed difference should move from 9.1/9.2 to a fixture under
   `tests/fixtures/{accept,reject}` and disappear from this file; the `; DIFF n`
   marker on the rule goes with it.
+
+## Appendix A. Character classes and shared vocabulary
+
+Names used by several sections, defined once here (after the grammar so that
+`<source-file>` is the first rule, the start symbol, in the derived files). Nushell source is bytes;
+"byte" means one byte of UTF-8.
+
+```bnf
+<digit>           ::= "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
+<ascii-digit>     ::= <digit>
+<ascii-letter>    ::= <a byte in "A".."Z" or "a".."z">
+<digit-2>         ::= "0" | "1"
+<digit-8>         ::= <digit-2> | "2" | "3" | "4" | "5" | "6" | "7"
+<digit-10>        ::= <digit>
+<digit-16>        ::= <digit> | "a" | "b" | "c" | "d" | "e" | "f" | "A" | "B" | "C" | "D" | "E" | "F"
+<hex>             ::= <digit-16>
+<radix-digit>     ::= <digit-2> | <digit-8> | <digit-16>      ; the digits of the literal's own radix
+<char>            ::= <one UTF-8 encoded character>
+<short-char>      ::= <char>                 ; for <short-flag-param> it must also be an <identifier-byte>
+<any-chars>       ::= { <any byte> }
+<additional-whitespace> ::= <the bytes the construct being lexed treats as whitespace (1.4)>
+<bare-char>       ::= <any byte the lexer lets into an item in the current context (1.3)>
+<dq-char>         ::= <any byte except "\">
+<dq-text>         ::= { <dq-char> | <escape> }                ; text between the "(...)" parts of $"..."
+<sq-text>         ::= { <any byte except "'"> }
+<bare-text>       ::= { <bare-char> }                         ; text between the "(...)" parts of a bare word
+<bare-glob>       ::= 1*<bare-char>                           ; an external word with no quote, paren or backtick
+<shebang>         ::= "#!" { <any byte except "\n"> }
+<word>            ::= <bare-word>                             ; one unquoted item (5.6)
+
+; Kinds of item, named by their first byte (each is one <item>, 1.3).
+<var-item>        ::= <dollar-expr>                           ; starts with "$" (5.9)
+<paren-item>      ::= <paren-expr>                            ; starts with "(" (5.12)
+<bracket-item>    ::= <bracket-expr>                          ; starts with "[" (5.1)
+<brace-item>      ::= <brace-expr>                            ; starts with "{" (5.13)
+<item-rest>       ::= <the text of an item after its first byte>
+
+; Bodies of bracketed items (the text between the delimiters).
+<list-body>       ::= { <list-sep> } { <list-item> { <list-sep> } }
+<list-or-table-body> ::= <the interior of a list-or-table item (5.14)>
+<record-body>     ::= { <record-sep> } { <record-entry> { <record-sep> } }
+
+; Names used across sections.
+<expression>      ::= <pipeline-element>                      ; parse_expression (3.1)
+<expression-of-one-item> ::= <expression>                     ; restricted to exactly one item
+<value-of-shape>  ::= <value>                                 ; parsed with the SyntaxShape of its argument position (consumer)
+<external-arg>    ::= <ext-arg>                               ; (4)
+<keyword-word>    ::= <the keyword a SyntaxShape::Keyword names: "in", "else", "catch", "finally", "as">
+<builtin-head>    ::= <call-head>                             ; must name a built-in command
+<filepath>        ::= <string>                                ; a file path (semantic)
+<field-token>     ::= <bare-word> | <double-quoted> | <single-quoted> | <backtick-quoted>   ; text taken verbatim
+<where-expr>      ::= <where>                                 ; (6.6, 7.7)
+<run-expr>        ::= <call>                                  ; "run" parsed as an ordinary call
+<statement-in-pipeline-error> ::= <pipeline-forbidden-head>        ; (6.1)
+```
