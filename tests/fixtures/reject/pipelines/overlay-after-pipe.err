@@ -1,6 +1,6 @@
-error: statement used in pipeline
+error: `overlay` is a statement and cannot be used inside a pipeline
   --> reject/pipelines/overlay-after-pipe.nu:1:6
   |
 1 | ls | overlay use spam
-  |      ^^^^^^^^^^^^^^^^
-  = help: declarations, `for`, `source`, `hide`, `overlay` and `plugin use` are statements, not pipeline elements
+  |      ^^^^^^^
+  = help: declarations and the module, source, overlay and plugin commands are statements of their own

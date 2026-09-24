@@ -140,6 +140,8 @@ impl Clone for CommandSet {
 pub struct Shared {
     config: ParseConfig,
     comments: Vec<Comment>,
+    /// Source text nu-parser accepts and discards (see [`Ast::ignored`]).
+    ignored: Vec<Span>,
     diagnostics: Vec<Diagnostic>,
     /// Command names declared with `def`/`extern`/`alias` in enclosing blocks,
     /// innermost scope last.
@@ -178,6 +180,19 @@ impl<'s, 'a> St<'s, 'a> {
         shared
             .comments
             .extend(tokens.iter().filter(|t| t.kind == TokenKind::Comment).map(|t| Comment { span: t.span }));
+    }
+
+    /// Record text that nu-parser accepts and discards (see [`Ast::ignored`]).
+    pub fn ignore(&self, span: Span) {
+        if !span.is_empty() {
+            self.shared.borrow_mut().ignored.push(span);
+        }
+    }
+
+    /// Drop the ignored text recorded from `start` on: a statement that turns
+    /// out to be a help call is parsed again as an ordinary call.
+    pub fn forget_ignored_from(&self, start: usize) {
+        self.shared.borrow_mut().ignored.retain(|s| s.start < start);
     }
 
     /// Record a diagnostic (used for recovered errors).
@@ -240,6 +255,7 @@ pub(crate) fn parse_source<'a>(source: &'a str, config: &ParseConfig) -> (Ast<'a
     let shared = RefCell::new(Shared {
         config: config.clone(),
         comments: Vec::new(),
+        ignored: Vec::new(),
         diagnostics: Vec::new(),
         decl_scopes: vec![CommandSet::default()],
     });
@@ -259,6 +275,8 @@ pub(crate) fn parse_source<'a>(source: &'a str, config: &ParseConfig) -> (Ast<'a
     let mut shared = shared.into_inner();
     shared.comments.sort_by_key(|c| (c.span.start, c.span.end));
     shared.comments.dedup();
+    shared.ignored.sort_by_key(|s| (s.start, s.end));
+    shared.ignored.dedup();
     shared.diagnostics.sort_by_key(|d| (d.span.start, d.span.end));
-    (Ast { source, block, comments: shared.comments, shebang }, shared.diagnostics)
+    (Ast { source, block, comments: shared.comments, shebang, ignored: shared.ignored }, shared.diagnostics)
 }

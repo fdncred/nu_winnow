@@ -14,6 +14,6 @@ Block 0..89
   Pipeline 61..88
     Extern `cmd3` 61..88
       Signature 73..88
-        Param positional `in` 74..87 : bool
-          Default
-            Bool true 83..87
+        Param positional `in` 74..82 : bool
+Ignored (1)
+  83..87 "true"

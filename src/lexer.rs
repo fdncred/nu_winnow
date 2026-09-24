@@ -298,8 +298,9 @@ fn token(i: &mut Input<'_>, opts: LexOptions) -> PResult<Option<Token>> {
     .map(|kind| kind.map(|kind| Token { kind, span: span_from(i, start) }))
 }
 
+/// A comment runs to the newline; like nu, a `\r` before it is part of the comment.
 fn comment_body(i: &mut Input<'_>) -> PResult<()> {
-    ('#', take_till(0.., ['\n', '\r'])).void().parse_next(i)
+    ('#', take_till(0.., ['\n'])).void().parse_next(i)
 }
 
 /// The opening bracket kinds tracked while scanning an item.

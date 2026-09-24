@@ -1,6 +1,6 @@
-error: expected a definition after the attributes
-  --> reject/calls/attributes-at-eof.nu:1:11
+error: missing required positional argument
+  --> reject/calls/attributes-at-eof.nu:1:1
   |
 1 | @example x
-  |           ^
-  = help: attributes must be followed by a `def` or `extern`
+  | ^
+  = help: `attr example` takes 2 positional argument(s)

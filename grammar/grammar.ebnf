@@ -1,17 +1,17 @@
-(* The Nushell grammar as nu-parser accepts it (nushell main 33beea694, 2026-09-23). *)
-(* Generated from grammar.md (the fences, in order). grammar.md carries the *)
-(* discussion, the coverage analysis and the meaning of the annotations; this *)
-(* file is the same grammar in one piece. Regenerate it from grammar.md rather *)
-(* than editing it directly. *)
+(* The Nushell grammar as nu-parser accepts it (nushell main d7cb4e589, 2026-09-23). *)
+(* Generated from grammar.md (the fences, in order) by tools/scripts/gen-grammar.nu. *)
+(* grammar.md carries the discussion, the coverage analysis and the meaning of *)
+(* the annotations; this file is the same grammar in one piece. Regenerate it *)
+(* from grammar.md rather than editing it directly. *)
 (* *)
 (* ISO 14977 style: name = definition ; with , concatenation, | alternatives, *)
 (* [ x ] optional, { x } repetition, N * x exactly N, "x" / 'x' terminals, *)
 (* ? ... ? special sequences for rules stated in prose; comments are bracketed *)
 (* by a paren-star pair, as in Pascal. *)
-(* `nu:` names the nu-parser source, `here:` the implementation in this crate, *)
-(* `DIFF n` a row of grammar.md section 9. *)
+(* `nu:` names the nu-parser source, `here:` the implementation in this crate. *)
 
 (* ==== 0. Notation and reading the annotations ==== *)
+
 (* <name> ::= alt1 | alt2      a rule; terminals are in double quotes
    [ x ]                       optional
    { x }                       zero or more
@@ -59,8 +59,7 @@ comment = "#", { ? any byte except "\n" ? } ;
    `[a]#b` are not comments. A comment inside brackets ends at "\n"/"\r" and the
    item continues. Comments are dropped when the construct lexes with skip_comment.
    nu: lex.rs:1075-1099, 429-447
-   here: src/lexer.rs::comment_body, scan_item (`in_comment`, `prev`)
-   (this crate ends a top-level comment at "\r"; nu at "\n": span-only, CRLF files) *)
+   here: src/lexer.rs::comment_body, scan_item (`in_comment`, `prev`) *)
 
 (* ==== 1.2 Tokens ==== *)
 
@@ -76,8 +75,8 @@ pipe = "|" ;
    ([Eol] Comment) pairs directly before it lose their Eol too, so `a\n# c\n| b` is
    one pipeline. Exactly ONE Eol is absorbed: `a\n\n| b` keeps an Eol (see 2.2).
    nu: lex.rs:1005-1031
-   here: src/parser/block.rs::pipe_ahead, take_pipe_ahead (in the block parser;
-   absorbs any number of Eol/Comment) ; DIFF 40 *)
+   here: src/parser/block.rs::pipe_ahead, take_pipe_ahead (the same rule, applied in
+   the block parser: exactly `Eol (Comment Eol)* Pipe` continues the line) *)
 
 pipe_pipe = "||" ;
 (* an error (ShellOrOr) everywhere except as empty closure parameters
@@ -119,7 +118,7 @@ bashism = "o>|" | "out>|" | "&&" | "2>" | "2>&1" ;
 item = item_part, { item_part } ;
 item_part = plain_byte | quoted_run | interp_quoted_run | raw_string | bracketed_run ;
 (* An item runs until, at bracket depth zero, a terminator byte is met: " " "\t"
-   "\n" "\r" "|" ";" or any byte in the construct's additional whitespace or
+   "\n" "\r" "|" ";" or any byte in the construct’s additional whitespace or
    special tokens (1.4). Quotes and brackets suspend termination. An empty item is
    UnexpectedEof("command"). A special byte at the START of an item is an item of
    its own (":" in record keys, "." in cell paths).
@@ -144,7 +143,7 @@ dq_byte = "\", ? any byte ? | ? byte except "\"" and "\\" ? ;
 interp_quoted_run = ? "$" ( "\"" | "'" ) ... the same quote ? ;
 (* When the byte before the opening quote (within the item) is "$", an unescaped "("
    inside the string opens a subexpression; from there quotes and parens nest via
-   interp_subexpr_step until the matching ")", and the string's own quote cannot
+   interp_subexpr_step until the matching ")", and the string’s own quote cannot
    close it. Backtick strings never interpolate. An unclosed "(" is Unclosed(")").
    nu: lex.rs:127 interp_subexpr_step, 417-426, 655
    here: src/lexer.rs::scan_item (`quote_is_interp`, `interp_level`), interp_subexpr_step *)
@@ -176,7 +175,7 @@ block_tokens = { separator }, [ pipeline, { separator, { separator }, pipeline }
 separator = eol | semicolon | comment_line ;
 comment_line = comment, eol ;
 (* Comment lines directly above a command (no blank line between) are its leading
-   comments (a def's documentation); a blank line clears them. A comment after a
+   comments (a def’s documentation); a blank line clears them. A comment after a
    token on the same line is a trailing comment. Empty pipelines are dropped.
    nu: lite_parser.rs:219 lite_parse, 466-487; parse_pipelines.rs:129 parse_block
    here: src/parser/block.rs::parse_block *)
@@ -187,7 +186,7 @@ lite_pipeline = [ pipe ], command, { pipe_continuation, command } ;
 (* A leading "|" yields an empty first command that is dropped (`( | str join)`).
    Two pipes in a row (`a | | b`) likewise drop the empty command.
    nu: lite_parser.rs:451, LitePipeline::push
-   here: src/parser/block.rs::pipeline, skip_pipe_continuation *)
+   here: src/parser/block.rs::pipeline (a pipeline of only pipes yields nothing) *)
 
 pipe_continuation = pipe, [ eol ], { comment_line } ;
 (* After "|" the next command may start on a later line: the Eol directly after the
@@ -198,15 +197,14 @@ pipe_continuation = pipe, [ eol ], { comment_line } ;
    pipelines, the second beginning with a dropped leading pipe. This changes meaning:
    `$x = 5\n\n| 3` leaves `$x = 5` in nu.
    nu: lite_parser.rs:198, 460; lex.rs:1005-1031
-   here: src/parser/block.rs::skip_pipe_continuation, pipe_ahead (absorb any
-   number of Eol/Comment: one pipeline) ; DIFF 40 *)
+   here: src/parser/block.rs::after_pipe (`Eol (Comment Eol)*`), pipe_ahead *)
 
-(* The trailing-pipe rule: a pipeline whose last non-comment token is "|" (skipping ([Comment]+ Eol) pairs
-   from the end) is UnexpectedEof("pipeline missing end"). So `ls |`, `ls | # c`
-   and `ls |\n# c` (no final newline) are errors; `ls |\n`, `ls |\n\n`,
-   `ls | # c\n` and `ls |\n# c\n` are not.
+(* The trailing-pipe rule: a BLOCK whose last non-comment token is "|" (skipping ([Comment]+ Eol) pairs
+   from the end) is UnexpectedEof("pipeline missing end"), whatever absorbed the
+   pipe. So `ls |`, `ls | # c`, `ls |\n# c` (no final newline) and `alias x = ls |`
+   are errors; `ls |\n`, `ls |\n\n`, `ls | # c\n` and `ls |\n# c\n` are not.
    nu: lite_parser.rs:509
-   here: src/parser/block.rs::pipeline (`newline_after_pipe`) ; DIFF 62 *)
+   here: src/parser/block.rs::parse_block, last_non_comment_token (nu’s, ported) *)
 
 command = [ attribute_lines ], command_body ;
 command_body = item, { item | redirection }, [ assignment_tail ]
@@ -239,19 +237,20 @@ assignment_tail = assignment_op, { item | pipe | pipe_pipe | redirection_op | co
    trailing "|" or before a leading "|" exactly as in <pipe-continuation> (one Eol).
    ";" ends the assignment. The tail is re-lexed and parsed as a block (3.3).
    nu: lite_parser.rs:259-291, 392-400
-   here: src/parser/block.rs::raw_command (`absorbing`) ; DIFF 40 applies *)
+   here: src/parser/block.rs::raw_command (`absorbing`, the same continuation rule) *)
 
 attribute_lines = attribute_line, { attribute_line } ;
 attribute_line = "@", item_rest, { item | pipe | pipe_pipe | redirection_op | assignment_op }, ( eol | semicolon ) ;
 (* An item starting with "@" enters attribute mode ONLY when the previous token is
    Eol or ";" (i.e. at the start of a pipeline); `echo 1 | @foo` is a call to `@foo`.
    Inside an attribute line every token up to the Eol/";" is part of the attribute:
-   pipes and redirections are NOT lite errors, they reach the attribute's argument
+   pipes and redirections are NOT lite errors, they reach the attribute’s argument
    parser as words. The definition must start on the very next line or after the
    ";": a blank line or a comment line between attributes and definition closes the
    command and the attributes then lack a definition (6.8).
    nu: lite_parser.rs:239-257, 379-383, 455-469
-   here: src/parser/block.rs::attribute_lines ; DIFF 42, DIFF 43 *)
+   here: src/parser/block.rs::attribute_lines (only for the first command of a
+   pipeline; every token of the line becomes a word) *)
 
 (* ==== 2.1 Which parser sees a command ==== *)
 
@@ -270,14 +269,15 @@ single_command_pipeline = keyword_statement | pipeline_element ;
    nu: parse_expressions.rs:1723 parse_builtin_commands, 1729-1873
    here: src/parser/statement.rs::parse_command, keyword_or_call (one match for all
    keywords including if/match/...; source, hide, run, overlay, plugin use are
-   plain Calls: consumer) *)
+   plain Calls checked against their fixed signatures: check_fixed_signature) *)
 
 multi_command_pipeline = pipeline_element, { pipeline_element } ;
 (* Every element is parsed with parse_expression (3.1); the keyword table is NOT
    consulted. Elements after the first that mention `$in` are wrapped in `collect`
    (semantic).
    nu: parse_pipelines.rs:50
-   here: src/parser/block.rs::pipeline + is_statement_only / is_statement_call *)
+   here: src/parser/block.rs::pipeline (the commands are collected first, then parsed
+   in Position::Element), src/parser/expr.rs::check_element_head *)
 
 (* ==== 3.1 Expression dispatch (`parse_expression`) ==== *)
 
@@ -316,8 +316,8 @@ element_body = assignment  (* if ANY remaining item is an <assignment-op> *)
    list: `ls | let x = 1` fails as an assignment (AssignmentRequiresVar) and
    `ls | let x` is a call to `let`.
    nu: parse_expressions.rs:1587-1680
-   here: src/parser/expr.rs::parse_expression, src/parser/block.rs::is_statement_only,
-   is_statement_call ; DIFF 10, 11, 12 *)
+   here: src/parser/expr.rs::parse_expression (Position::Element after a "|" and
+   after shorthand), check_element_head (the same head table) *)
 
 (* An item is math-expression-like when it is one of:
    "true" | "false" | "null" | "not" | "if" | "match"
@@ -375,8 +375,9 @@ assign_rhs = block_tokens ;  (* the absorbed tail (2), re-lexed and *)
    rhs: an unknown (external) command at the start of the rhs must be written with
    "^" ("External command calls must be explicit in assignments").
    nu: parse_expressions.rs:1026 parse_assignment_expression, 1108
-   here: src/parser/expr.rs::assignment (lhs: Var, Subexpression, or FullCellPath
-   whose head is Var/Subexpression) ; DIFF 44, DIFF 25 *)
+   here: src/parser/expr.rs::assignment (lhs: Var, Subexpression, FullCellPath, List,
+   Table or a "key: value" Record, which are what parse_full_cell_path yields;
+   the "^" rule is applied when a command table is configured) *)
 
 (* ==== 4. Calls ==== *)
 
@@ -397,8 +398,14 @@ ext_head = var_item | paren_item  (* parsed as an expression *)
 ext_arg = "...", ( bracket_item | var_item | paren_item )  (* spread *)
           | var_item | paren_item | bracket_item | brace_item
           | ext_string ;
-(* nu: parse_calls.rs:375 parse_external_call, 347 parse_external_arg
-   here: src/parser/expr.rs::external_call, external_arg *)
+(* a "[" argument goes to parse_list_expression alone, which needs the item to END
+   with "]": `^cmd [a].x`, `^cmd [a].0`, `^cmd ...[a].x` are Unclosed("]"), while
+   `^cmd (ls).name` and `^cmd {a: 1}.a` parse. The same holds for an unknown bare
+   head, which is an external command for nu (`se [a].0`).
+   nu: parse_calls.rs:375 parse_external_call, 347 parse_external_arg, 362;
+   parse_expressions.rs:115 parse_list_expression
+   here: src/parser/expr.rs::external_call, external_arg, check_external_list
+   (for an unknown bare head only when a command table is configured) *)
 
 ext_string = raw_string
              | bare_glob  (* no quote, paren or backtick in it *)
@@ -445,7 +452,7 @@ long_flag = "--", flag_name, [ "=", value ]
 
 short_flags = "-", char, { char } ;
 (* each char must be a known short flag; only the LAST may take a value. `-1` /
-   `-1.5` / `-.5` is a negative number instead when the current positional's shape
+   `-1.5` / `-.5` is a negative number instead when the current positional’s shape
    is Int/Number/Float (or a OneOf containing one); for any other shape it is
    "doesn't have flag -1" (so `echo -1` and `return -1` are errors in nu).
    nu: parse_calls.rs:571 parse_short_flags, shape_allows_negative_number
@@ -489,7 +496,8 @@ bracket_expr = list_or_table, [ cell_path_tail ] ;
 (* only when the expected shape is Any, List, Table, Signature, ExternalSignature,
    Filepath, String, GlobPattern or ExternalArgument; every other shape rejects "["
    nu: parse_expressions.rs:869-885, 950-955
-   here: src/parser/value.rs::value ("[" -> cellpath::full_cell_path; no shape check) *)
+   here: src/parser/value.rs::value, typed_value ("[" checked against the shape for the
+   typed defaults of 7.1; the argument shapes of calls are the consumer’s) *)
 
 shaped_value = any_value  (* shape Any *)
                | int  (* Int *)
@@ -505,8 +513,8 @@ shaped_value = any_value  (* shape Any *)
 (* Block, Closure and Record shapes are satisfied only by a "{" item.
    nu: parse_expressions.rs:893-1004
    here: src/parser/value.rs::value with Hint::{Any,Number,String,Closure,MatchBody,
-   Signature}; the other shapes arise only from signatures (consumer).
-   Hint::String does not refuse "true"/"false"/"null" ; DIFF 17 *)
+   Signature,Typed}: Typed is the declared shape of a parameter default (7.1);
+   the argument shapes of calls are the consumer’s *)
 
 any_value = nothing | bool
             | binary  (* 1st: only "0x["/"0o["/"0b[" prefixes; bad digit = hard error *)
@@ -519,7 +527,7 @@ any_value = nothing | bool
             | string ;  (* 8th: any remaining text *)
 (* "hard error" = not an `Expected` error, so the item is garbage, never a string
    nu: parse_expressions.rs:947-1000
-   here: src/parser/value.rs::any_value (same order) ; DIFF 6 (`0x[13]=`) *)
+   here: src/parser/value.rs::any_value (same order) *)
 
 (* ==== 5.2 Booleans, nothing, numbers ==== *)
 
@@ -541,7 +549,7 @@ float = float_text ;  (* after deleting every "_" *)
 float_text = [ "+" | "-" ], ( digit, { digit }, [ ".", { digit } ] | ".", digit, { digit } ),
              [ ( "e" | "E" ), [ "+" | "-" ], digit, { digit } ]
              | [ "+" | "-" ], ( "inf" | "infinity" | "nan" ) ;  (* case-insensitive *)
-(* exactly what Rust's f64::from_str accepts
+(* exactly what Rust’s f64::from_str accepts
    nu: parse_literals.rs:198 parse_float, 210 parse_number
    here: src/parser/literal.rs::parse_float, number *)
 
@@ -571,12 +579,12 @@ date = 4 * digit, "-", 2 * digit, "-", 2 * digit ;  (* item >= 6 bytes, byte 4 i
 time_sep = "T" | "t" ;
 time = 2 * digit, ":", 2 * digit, ":", 2 * digit, [ ".", digit, { digit } ] ;
 offset = "Z" | "z" | ( "+" | "-" ), 2 * digit, ":", 2 * digit ;
-(* Validity is chrono's parse_from_rfc3339: month 1-12, day valid for that month and
+(* Validity is chrono’s parse_from_rfc3339: month 1-12, day valid for that month and
    year (2023-02-30 is a string), hour < 24, minute < 60, second <= 60, offset
    hours < 24; seconds are mandatory; "+0530" (no colon) is not an offset. Anything
    that fails is a plain string.
    nu: parse_literals.rs:1304 parse_datetime
-   here: src/parser/literal.rs::is_datetime (day checked as 1-31 only) ; DIFF 31 *)
+   here: src/parser/literal.rs::is_datetime, days_in_month *)
 
 (* ==== 5.5 Binary ==== *)
 
@@ -614,7 +622,7 @@ backtick_quoted = "`", { ? byte except "`" ? }, "`" ;  (* no escapes; NOT checke
                   (* trailing text: `a`b is the *)
                   (* literal string `a`b *)
 (* nu: parse_literals.rs:1921 check_string_no_trailing_tokens (only the double and the single quote)
-   here: src/parser/strings.rs::quoted_body ; DIFF 32 (backtick value) *)
+   here: src/parser/strings.rs::quoted_body, string_lit *)
 
 escape = "\", ( '"' | "'" | "\" | "/" | "(" | ")" | "{" | "}" | "$" | "^"
          | "#" | "|" | "~" | " " | "a" | "b" | "e" | "f" | "n" | "r" | "t" | "0" )
@@ -623,7 +631,7 @@ escape = "\", ( '"' | "'" | "\" | "/" | "(" | ")" | "{" | "}" | "$" | "^"
          | "\u{", hex, 5 * [ hex ], "}" ;  (* a valid scalar (no surrogates, <= 10FFFF) *)
 (* \a=07 \b=08 \e=1b \f=0c; any other "\X" or a trailing "\" is an error
    nu: parse_literals.rs:1737 unescape_string, 1657 parse_hex_escape, 1685 parse_unicode_escape
-   here: src/parser/literal.rs::unescape ("\x" limited to 00-7F) ; DIFF 27 *)
+   here: src/parser/literal.rs::unescape (bytes, then one UTF-8 check) *)
 
 (* <raw-string> and <hashes> are defined with the lexer (1.3): the same "#" count on
    both sides; the body may contain "'" followed by fewer "#"
@@ -685,7 +693,8 @@ bound = int | float  (* shape Number *)
    "1...5" is the range 1 .. 0.5.
    nu: parse_literals.rs:231 parse_range
    here: src/parser/cellpath.rs::is_range_syntax, range_operators, is_range_bound,
-   range (a "(" bound must END with ")") ; DIFF 26 *)
+   range (a "(" bound is a closed group with any cell path after it; a "("
+   group that does not close, `(1)abc`, is the string the ".." refuses) *)
 
 (* ==== 5.11 Cell paths ==== *)
 
@@ -705,12 +714,12 @@ member = int  (* non-negative after "_" removal; "-1" is *)
          (* "negative index is not supported" *)
          | string ;  (* bare word, "...", '...', `...`; a member *)
          (* containing "(" (bare interpolation) is an error *)
-(* The item is lexed with "." "?" "!" special, so "a.b" splits but 'a"b.c"' does not;
+(* The item is lexed with "." "?" "!" special, so "a.b" splits but 'a"b.c\'" does not;
    newlines inside are whitespace. A "(...)" head is parsed as a block (a whole
    pipeline list, so `(ls | length).0` works).
    nu: parse_literals.rs:885 parse_cell_path, 1033, 1059 parse_full_cell_path
-   here: src/parser/cellpath.rs::cell_path_members, dollar, full_cell_path
-   (members go through string_lit, so "a(b)" is accepted) ; DIFF 8 *)
+   here: src/parser/cellpath.rs::cell_path_members, dollar, full_cell_path,
+   cell_path_literal (a bare member with "(" in it is refused) *)
 
 (* ==== 5.12 Parenthesised items ==== *)
 
@@ -737,8 +746,8 @@ brace_expr = record | closure | block | match_block | full_cell_path ;
    Any -> closure; any other shape -> "non-block value"
    So a record where a Block is required (`if true {a: 1}`) is a type mismatch.
    nu: parse_literals.rs:547 parse_brace_expr
-   here: src/parser/value.rs::brace, probe_brace (block position: a "key:" body is
-   parsed as a block) ; DIFF 21 *)
+   here: src/parser/value.rs::brace, probe_brace, block_body (a "key:" body in block
+   position is "expected block, found a record") *)
 
 closure = "{", [ closure_params ], block_tokens, "}" ;
 closure_params = "|", params, "|" | "||" ;  (* may be preceded by newlines (7.1) *)
@@ -757,22 +766,27 @@ list_sep = whitespace | "," | eol | "|" | comment ;
 (* "|" splits the body into pipeline elements whose items are all list items; a
    trailing "|" is "Unexpected end of code"; "||" is ShellOrOr; ";" is "Unexpected
    semicolon in list"; a redirection token (`o> file`) is consumed by the lite parser
-   and silently dropped ([a o> b] is ["a"]); an assignment-op item ("=") is a bare word. *)
+   and silently dropped ([a o> b] is ["a"]; nothing before it, no target, or a second
+   one for the same stream is an error); an assignment-op item ("=") is a bare word
+   and, as in every lite parse, everything after it is one (`[a = b | c]` has five). *)
 list_item = value | spread ;
 spread = "...", ( "[", list_body, "]" | variable, [ cell_path_tail ] | "(", block_tokens, ")" ) ;
 (* "...x" with any other first byte is the bare word "...x"
    nu: parse_expressions.rs:105 parse_list_expression; parse_helpers.rs:12-31
-   here: src/parser/collections.rs::list_or_table, list_item; value.rs::is_spread
-   ; DIFF 1, 2 (";" and "||" skipped), DIFF 33 (`o>` kept) *)
+   here: src/parser/collections.rs::lite_parts (the lite parse of a bracket’s tokens;
+   dropped redirections are recorded as ignored text), list_or_table, list_item;
+   value.rs::is_spread *)
 
 table = "[", list, ";", list, { list_sep, list }, "]" ;
-(* The item is a table iff its body's first token starts with "[" and its second is
+(* The item is a table iff its body’s first token starts with "[" and its second is
    ";". Then: no row after ";" is "expected table row"; every row token must start
    with "[" (a second ";" is an error); no spreads in header or rows; each row must
    have exactly as many items as the header (MissingColumns / ExtraColumns); every
    header item must be a string or it is "Table column name not string".
    nu: parse_expressions.rs:240 parse_table_expression, 217, 376
-   here: src/parser/collections.rs::table, list_row ; DIFF 3, 4, 5 *)
+   here: src/parser/collections.rs::table, list_row (all four checks; a column name is
+   a string when it is a string, an interpolation, a variable, a cell path or a
+   subexpression: the type of the last three is the consumer’s) *)
 
 (* ==== 5.15 Records ==== *)
 
@@ -789,7 +803,7 @@ record_spread = "...", ( "{", record_body, "}" | variable, [ cell_path_tail ] | 
    not an item ("|", "||", ";", "=", "+=", "o>") is "Unexpected token in record";
    a key with no ":" is "Incomplete record field"; ":" then nothing is an error.
    nu: parse_expressions.rs:1943 parse_record, 1877 check_record_key_or_value
-   here: src/parser/collections.rs::record, check_bare_colon ; DIFF 7 (`{a: =}`) *)
+   here: src/parser/collections.rs::record, check_bare_colon *)
 
 (* ==== 6.1 Keyword table and pipeline restrictions ==== *)
 
@@ -801,23 +815,47 @@ keyword_statement = def | extern | export | export_env | attribute_block
    nu: parse_expressions.rs:1770-1830
    here: src/parser/statement.rs::keyword_or_call *)
 
+(* Every keyword is a command with a fixed signature, so at the start of each of its
+   positional arguments nu looks for flags (any number of them): "--help"/"-h"
+   there makes the whole statement an ordinary call (`def foo [] --help`, `for x
+   --help in [] {}`, `alias alias --help`), the first "--" is consumed and dropped,
+   and any other "-x" is "doesn't have flag" (`return -1`, `match -1 {}`, `if -1 >
+   0 {}`, `where -1 > 0`). Where a positional spans several items (a condition, a
+   signature, an alias target) only its first item is such a boundary.
+   After "--help" nu goes on parsing the positionals that follow and only forgives
+   the MISSING ones: `match 1 --help :{}` has no match block, `return --help 1 2`
+   and `loop --help {} y` have an extra positional, `def foo [] {} {} --help` has no
+   colon, but `for x --help in []` still lacks the argument of `in` (6.6). After "--" no
+   flag is looked for at all: a second "--" is a positional (`try {} -- catch {}
+   --` has one too many), `return -- --help` returns a string.
+   The statements nu parses by position never see "--": `alias -- x = ls`, `alias x
+   -- = ls`, `module -- x {}`, `module x -- {}`, `let -- x = 1`, `export-env -- {}`
+   are errors ("missing sign", "expected block", "not a valid variable name"). An
+   alias help call must be the whole statement: `alias --help x = ls` and `alias x
+   --help extra` are "missing sign". `export --help x` has an extra positional.
+   nu: parse_calls.rs:1067-1213 (parse_long_flag, parse_short_flags per positional,
+   `end_of_options`), 30 check_call; parse_alias.rs:20 check_alias_name
+   here: src/parser/statement.rs::boundary, boundary_help, end_of_options,
+   item_or_help, help_call *)
+
 pipeline_forbidden_head = ? "def" | "extern" | "for" | "module" | "use" | "source" | "alias" | "export" | "export-env" | "hide" | "const" | "mut" | "overlay" (unless followed by "list") | "plugin" "use" ? ;
 (* refused with "statement used in pipeline" at ANY position of a multi-element
    pipeline, including the first, and after env shorthand (3.1). `let` is not in
    the list, but `ls | let x = 1` fails because the "=" routes it to assignment.
    nu: parse_expressions.rs:1602-1685
-   here: src/parser/block.rs::is_statement_only (def/extern/alias/module/use/export/
-   export-env/attributes/for at any position), is_statement_call (source/hide/
-   overlay/plugin use only at index > 0) ; DIFF 10, 11, 12 *)
+   here: src/parser/expr.rs::check_element_head (every element of a multi-command
+   pipeline and the command after shorthand are parsed in Position::Element) *)
 
 (* Redirections are refused on: def, extern, alias, use, module, for, source,
-   source-env, run, hide, overlay*, plugin use, export*, export-env.
-   A redirection on these is RedirectingBuiltinCommand. `let x = ls o> f` is not an
-   error because the redirection is absorbed into the rhs pipeline.
+   source-env, run, hide, overlay* (by the word "overlay" alone, before its
+   arguments), plugin use, export*. A redirection on these is
+   RedirectingBuiltinCommand. On export-env it is dropped without a look. `let x =
+   ls o> f` is not an error because the redirection is absorbed into the rhs pipeline.
    nu: redirecting_builtin_error call sites in parse_def.rs, parse_alias.rs,
    parse_module.rs, parse_source.rs, parse_expressions.rs:1801,1817
-   here: src/parser/statement.rs::is_redirect_forbidden (def/extern/let/mut/const/
-   for/alias/module/use/export/export-env/attributes) ; DIFF 13 *)
+   here: src/parser/statement.rs::is_redirect_forbidden (the statements, and the calls
+   whose fixed signature is not redirectable); parse_command (export-env’s
+   redirection is ignored text) *)
 
 parser_keyword = "if" | "match" | "try" | "overlay" | "overlay hide"
                  | "overlay new" | "overlay use"  (* aliasable *)
@@ -830,7 +868,7 @@ parser_keyword = "if" | "match" | "try" | "overlay" | "overlay hide"
 (* a def/extern/alias NAME equal to any entry (after quote removal) is NameIsKeyword;
    the multi-word entries match quoted names (`def "export def"`)
    nu: parse_keywords.rs:9-46, 95 reject_parser_keyword_name
-   here: src/parser/statement.rs::is_parser_keyword (single words only) ; DIFF 14 *)
+   here: src/parser/statement.rs::is_parser_keyword (both tables, multi-word entries included) *)
 
 bad_definition_name = ? a name containing "#" | "^" | "%" | a name parsing as a filesize ("1kb") or f64 ("5", "1.5", "inf") ? ;
 (* nu: parse_def.rs:89, parse_alias.rs:144
@@ -838,9 +876,11 @@ bad_definition_name = ? a name containing "#" | "^" | "%" | a name parsing as a 
 
 (* Predeclaration: before a block is parsed, every single-command pipeline of the form
    [ "export" ] ( "def" | "extern" ) { "--flag" } <name> ... "[" | "(" declares <name>,
-   so calls to commands defined later in the file resolve
-   nu: parse_def.rs:52 parse_def_predecl
-   here: src/parser/block.rs::predeclare (also `alias`) *)
+   so calls to commands defined later in the file resolve; the same name declared
+   twice this way in one block is DuplicateCommandDef (an alias is not predeclared,
+   so `def foo` plus `alias foo` is fine, and so is a nested block)
+   nu: parse_def.rs:52 parse_def_predecl, 161
+   here: src/parser/block.rs::predeclare (also `alias`, for head resolution) *)
 
 (* ==== 6.2 let, mut, const ==== *)
 
@@ -850,12 +890,12 @@ const = "const", var_decl, "=", rhs_pipeline ;
 rhs_pipeline = ? <assignment-tail> body parsed as <block-tokens> ? ;
 (* (2) everything to
    the end of the line *)
-(* `let x` without a value is allowed (initial_value is optional in let's signature);
+(* `let x` without a value is allowed (initial_value is optional in let’s signature);
    `mut x` and `const x` are MissingPositional. A redirection or "|" in the rhs is
    part of the rhs pipeline. Type checks and const-evaluability: semantic.
    nu: parse_bindings.rs:20 parse_let, 298 parse_mut, 148 parse_const;
    nu-cmd-lang core_commands/{let_,mut_,const_}.rs signatures
-   here: src/parser/statement.rs::binding_stmt (value optional for all three) ; DIFF 15 *)
+   here: src/parser/statement.rs::binding_stmt *)
 
 (* ==== 6.3 def, extern ==== *)
 
@@ -867,66 +907,81 @@ def_flag = "--env" | "--wrapped" ;
    nu: parse_def.rs:321 parse_def (via parse_internal_call)
    here: src/parser/statement.rs::def_stmt, def_flags (before or after the name) *)
 
-def_name = string -  parser_keyword | bad_definition_name  ;  (* bare or quoted (multi-word) *)
-(* must be a string item: `def $x`, `def (foo)`, `def [foo]` are errors ("no space
-   between name and parameters" for "(" / "["); `def foo[]` is the same error
+def_name = string - reserved_definition_name ;  (* bare or quoted (multi-word) *)
+reserved_definition_name = parser_keyword | bad_definition_name ;
+(* must be a string item: `def $x` and `def $"x"` are "expected string"; a name with
+   "(" or "[" anywhere in its text, quoted or not (`def (foo)`, `def [foo]`,
+   `def "a(b"`, `def foo[]`), is "no space between name and parameters"
    nu: parse_def.rs:958 detect_params_in_name; SyntaxShape::String
-   here: src/parser/signature.rs::definition_name ; DIFF 16 *)
+   here: src/parser/statement.rs::command_name, src/parser/signature.rs::definition_name *)
 
 full_signature = signature_item
+                 | signature_item, brace_item  (* the brace item is DROPPED (never parsed): *)
+                 (* `def f [] {} {}`, `extern f [] {}` *)
                  | signature_item, ":", io_types  (* "[]" ":" "int -> string" *)
                  | signature_item, ":"  (* colon and nothing after it *)
                  | signature_item_colon, io_types ;  (* "[]:" glued colon *)
 signature_item = "[", params, "]" | "(", params, ")" ;
 signature_item_colon = signature_item, ":" ;
-(* the io types are all items between the signature and the body, concatenated and
-   re-lexed with "," as whitespace (7.3); items there without a ":" are the error
-   "colon (:) before type signature"
-   nu: parse_signatures.rs:390 parse_full_signature, 544 parse_signature
-   here: src/parser/statement.rs::signature_item, io_types ; DIFF 45 (`[] : {}`) *)
+(* The signature argument of def/extern receives every item up to (def) or including
+   (extern) the last one: one item is the signature; two of which the second starts
+   with "{" is the signature and an item nu drops on the floor; otherwise the io
+   types are the items after a ":" (glued or alone), concatenated and re-lexed with
+   "," as whitespace (7.3), possibly none; items there without a ":" are the error
+   "colon (:) before type signature". `[]:` with nothing after it is Unclosed.
+   nu: parse_signatures.rs:390 parse_full_signature, 544 parse_signature;
+   parse_calls.rs:655 calculate_end_span
+   here: src/parser/statement.rs::full_signature (the dropped item is ignored text) *)
 
-def_body = closure  (* def: SyntaxShape::Closure, so `{|x| }` parses *)
-           | block ;  (* export def: SyntaxShape::Block, but a HACK in *)
-           (* parse_calls parses it as a closure first, so *)
-           (* `export def f [] {|x| }` parses too *)
-(* extra items after the body are tolerated (`def foo [] {} extra`)
-   nu: parse_calls.rs:1467; nu-cmd-lang def.rs:21, export_def.rs:21
-   here: src/parser/statement.rs::block_item -> value::block_body (refuses params;
-   refuses extra items, deliberately) ; DIFF 28, DIFF 46
-   `--wrapped` needs a `...rest` param typed string or untyped: consumer *)
+def_body = closure ;
+(* def and export def both go through the `def` declaration (SyntaxShape::Closure):
+   the body is parsed as a closure before its shape is looked at, so `{|x| }` parses
+   (the parameters are then replaced by the signature) and `{a: 1}` is code (a call
+   to `a:`). Because the signature takes every item but the last, `def foo [] {} extra`
+   fails on `extra` as the body while `def foo [] {} {}` drops the first `{}`.
+   `--wrapped` needs a `...rest` param that is untyped or typed `string`.
+   nu: parse_calls.rs:1424-1449, 1467; parse_def.rs:585-628; nu-cmd-lang def.rs:21
+   here: src/parser/statement.rs::def_stmt, closure_body (the `|x|` parameters are kept
+   as Def::body_params), check_wrapped *)
 
-extern = "extern", def_name, full_signature, [ block ] ;
-(* the optional body (the former `extern-wrapped`) is accepted; with a body the
-   signature must have a rest param. No flags. For extern signatures a default-value
-   token is not parsed at all (`extern foo [x = 0x]` parses).
-   nu: parse_def.rs:370 parse_extern, 685 parse_extern_inner, 753-798
-   here: src/parser/statement.rs::extern_stmt (no body) ; DIFF 47, DIFF 55 *)
+extern = "extern", def_name, full_signature ;
+(* The signature argument takes every remaining item, so a body (the former
+   `extern-wrapped`, still in nu’s signature) never reaches it: `extern foo [] {}`
+   drops the `{}` unparsed, the body positional in parse_extern_inner is dead code,
+   and `extern foo [] {} {}` is "colon (:) before type signature". No flags. For
+   extern signatures a default-value token is not parsed at all (`extern foo [x = 0x]`
+   parses; the token is ignored text).
+   nu: parse_def.rs:370 parse_extern, 685 parse_extern_inner, 753-798; parse_calls.rs:655
+   here: src/parser/statement.rs::extern_stmt, full_signature *)
 
 (* ==== 6.4 alias ==== *)
 
-alias = "alias", def_name, "=", alias_target ;
-(* `alias x=y`, `alias x`, `alias x =`, `alias = x` are errors *)
+alias = "alias", def_name, "=", alias_target
+        | "export", "alias", def_name, "=" ;  (* no target: accepted (see below) *)
+(* `alias x=y`, `alias x`, `alias x =`, `alias = x` are errors; `export alias x =` is
+   NOT, because the "incomplete alias" check counts items without the `export` word *)
 alias_target = ? <call> over ALL remaining items, pipes and redirections included, as bare words (assignment mode) ? ;
 (* refused: a target whose first item is math-expression-like (`1 + 1`, `$x`, `(ls)`,
    `[1]`, `{ }`, `not ...`, `"ls"`, `-1`) => CantAliasExpression, except `if` and
    `match`; a target that is an unaliasable keyword (`alias d = def`, `alias l = let`,
    `alias e = export def`) => CantAliasKeyword; aliasable keywords and any external
    call (`^ls -l`, and `FOO=1 ls`, which parses as the external `FOO=1`) are fine.
-   nu: parse_alias.rs:63 parse_alias, 186-250
-   here: src/parser/statement.rs::alias_stmt (target must be Call/ExternalCall/
-   DynamicCall) ; DIFF 18, DIFF 48 *)
+   nu: parse_alias.rs:63 parse_alias, 186-250, 300-306
+   here: src/parser/statement.rs::alias_stmt (the same three checks; missing positionals
+   of a keyword target are forgiven as in nu, `alias x = overlay new`) *)
 
 (* ==== 6.5 Modules ==== *)
 
 use = "use", module_ref, import_pattern_tail ;  (* (7.5) *)
 module_ref = string | "null" | variable | "(", block_tokens, ")" ;  (* const-evaluated *)
 (* nu: parse_module.rs:1084 parse_use; parse_signatures.rs:20 parse_import_pattern
-   here: src/parser/statement.rs::use_stmt ; DIFF 19, DIFF 49 *)
+   here: src/parser/statement.rs::use_stmt, use_member, use_member_list *)
 
 module = "module", module_name, [ "{", module_body, "}" ] ;
-module_name = string ;  (* a "{...}" name is a type error *)
-(* nu: parse_module.rs:868 parse_module
-   here: src/parser/statement.rs::module_stmt (Hint::String accepts a record) ; DIFF 20 *)
+module_name = string ;  (* a literal only: "{...}" is a type error, *)
+              (* "$x", "(..)" and $"..." are "not a string" *)
+(* nu: parse_module.rs:868 parse_module, 936
+   here: src/parser/statement.rs::module_stmt, module_name *)
 
 module_body = { module_item } ;
 module_item = def | extern | export | attribute_block
@@ -942,11 +997,13 @@ export = "export", ( def | extern | alias | use | module | const ) ;
    nu: parse_module.rs:72 parse_export_in_block, 159 parse_export_in_module
    here: src/parser/statement.rs::export_stmt *)
 
-export_env = "export-env", block ;
-(* only the first argument is looked at: `export-env {} extra` parses in nu. A closure
-   (`{|x| }`) or a record body is refused.
+export_env = "export-env", block, { item } ;
+(* only the first argument is looked at: `export-env {} extra`, `export-env {} {}` and
+   a redirection on it parse in nu, the rest dropped. A closure (`{|x| }`) or a record
+   body is refused.
    nu: parse_module.rs:367 parse_export_env
-   here: src/parser/statement.rs::export_env_stmt (extra items rejected, deliberate) ; DIFF 52 *)
+   here: src/parser/statement.rs::export_env_stmt (the extra items and the redirection
+   are ignored text) *)
 
 hide = "hide", string, [ member ] ;  (* module or single decl *)
 (* hide-env [--ignore-errors | -i] { <string> } is an ordinary command *)
@@ -966,22 +1023,28 @@ plugin_use = "plugin", "use", string, [ "--plugin-config", filepath ] ;
    system or the module table.
    nu: parse_module.rs:1349 parse_hide, 1529/1572/1806 overlay_*; parse_source.rs:60
    parse_source, 219 parse_run, 546 parse_plugin_use; nu-cmd-lang signatures
-   here: ordinary Call with (multi-word) head: consumer *)
+   here: ordinary Call checked against its fixed signature (flags and their values,
+   positional counts, "as", "-1" as a flag, "null" only where Nothing is allowed):
+   src/parser/statement.rs::check_fixed_signature; the const-evaluation and
+   resolution of the names: consumer *)
 
 (* ==== 6.6 Control flow ==== *)
 
 for = "for", var_decl, "in", value, block ;
 (* the iterable is ONE item of shape Any (a bare word is a string); the body is a
    Block (no params, no record); no flags (`--numbered` was removed); nothing may
-   follow the block
-   nu: parse_def.rs:166 parse_for; nu-cmd-lang for_.rs
+   follow the block. The last item is reserved for the block before the keyword’s
+   argument is read, so `for x in []` and `for x --help in []` are
+   KeywordMissingArgument("in") (a help flag forgives nothing there); the type of
+   a `x:` variable is every item before "in" (7.4).
+   nu: parse_def.rs:166 parse_for; nu-cmd-lang for_.rs; parse_calls.rs:680, 876
    here: src/parser/statement.rs::for_stmt *)
 
 while = "while", math_expression, block ;
 loop = "loop", block ;
 (* the condition is every item before the last; a record body is a type error
    nu: nu-cmd-lang while_.rs, loop_.rs (parsed by parse_call)
-   here: src/parser/statement.rs::while_stmt, loop_stmt ; DIFF 21 *)
+   here: src/parser/statement.rs::while_stmt, loop_stmt, block_item *)
 
 if = "if", math_expression, block, [ "else", else_body ] ;
 else_body = block | expression ;  (* OneOf(Block, Expression) *)
@@ -990,20 +1053,26 @@ else_body = block | expression ;  (* OneOf(Block, Expression) *)
    `else if ...`, `else 5`, `else ls` and `else {|x| }` (Block fails, Expression gives
    a closure) parse; `else {} else {}` is an error; a record then-block is a type error
    nu: nu-cmd-lang if_.rs; parse_calls.rs:782 (Keyword + OneOf)
-   here: src/parser/statement.rs::if_stmt ; DIFF 21, DIFF 50 *)
+   here: src/parser/statement.rs::if_stmt, block_or_value *)
 
-match = "match", value, match_block ;
+match = "match", value, match_block
+        | "match", value, ( closure | record | variable | "(", block_tokens, ")" ) ;
+(* The second form is what nu makes of a `{|x| ..}`, `{a: 1}`, `$x` or `(..)` where
+   the arms should be: the MatchBlock shape lets the brace probe (5.13) and the "$"/"("
+   dispatch through, the value type-checks as Any, and the match fails at run time.
+   `match 1 [a]` and `match 1 foo` are errors. *)
 match_block = "{", { arm_sep }, { match_arm, { arm_sep } }, "}" ;
 arm_sep = whitespace | "," | eol | "|" | comment ;
 match_arm = pattern, { "|", pattern }, [ "if", math_expression ], "=>", arm_body ;
 arm_body = block | expression_of_one_item ;  (* OneOf(Block, Expression) *)
 (* the guard is every token between "if" and the next "=>"; the body is exactly ONE
-   item (`=> ls -l` makes `-l` the next arm's pattern); `{a: 1}` and `{|x| ..}` bodies
+   item (`=> ls -l` makes `-l` the next arm’s pattern); `{a: 1}` and `{|x| ..}` bodies
    parse (record / closure); a scrutinee bare word is a string. "|" between arms is
    whitespace to the lexer (so `1 => 2 | 3 => 4` fails only type checking).
-   nu: parse_expressions.rs:472 parse_match_block_expression; nu-cmd-lang match_.rs
-   here: src/parser/statement.rs::match_stmt, src/parser/pattern.rs::match_block,
-   match_arm ; DIFF 29 *)
+   nu: parse_expressions.rs:472 parse_match_block_expression, 848 parse_value;
+   nu-cmd-lang match_.rs
+   here: src/parser/statement.rs::match_stmt (the second form is kept as
+   Match::value_block), src/parser/pattern.rs::match_block, match_arm *)
 
 try = "try", block, [ handler ], [ handler ] ;
 handler = ( "catch" | "finally" ), closure_value ;
@@ -1012,7 +1081,8 @@ closure_value = closure | variable | "(", block_tokens, ")" ;  (* must be a clos
    `catch {} catch {}` parse; a third handler is ExtraPositional; a record or a bare
    word is an error
    nu: nu-cmd-lang try_.rs (OneOf(Keyword catch, Keyword finally) twice)
-   here: src/parser/statement.rs::try_stmt ; DIFF 22 *)
+   here: src/parser/statement.rs::try_stmt, handler_value (the closure type of a
+   variable or subexpression: consumer) *)
 
 return = "return", [ value ] ;
 break = "break" ;
@@ -1020,7 +1090,7 @@ continue = "continue" ;
 (* `return` takes ONE item of shape Any (`return 1 2`, `return 1 + 1` are extra
    positionals; `return -1` is "doesn't have flag -1"); break/continue take nothing
    nu: nu-cmd-lang return_.rs, break_.rs, continue_.rs
-   here: src/parser/statement.rs::return_stmt, simple_stmt (`return -1`: consumer) *)
+   here: src/parser/statement.rs::return_stmt, simple_stmt, boundary *)
 
 where = "where", row_condition ;  (* (7.7) *)
 (* nu: parse_source.rs:527 parse_where, 472 parse_where_expr
@@ -1042,7 +1112,9 @@ annotated = def | extern | "export", ( def | extern ) ;
    nu: parse_calls.rs:2022 parse_attribute; parse_def.rs:278 parse_attribute_block;
    parse_module.rs:110, 203
    here: src/parser/block.rs::attribute_lines, src/parser/statement.rs::parse_command,
-   attribute (name table: consumer) ; DIFF 23, DIFF 24 *)
+   attribute (the empty name is refused; whether `attr <name>` exists is the
+   consumer’s, it may come from a `use`d module; the arguments of the built-in
+   attributes are checked: check_fixed_signature_named) *)
 
 (* ==== 7.1 Signatures ==== *)
 
@@ -1055,13 +1127,14 @@ param_separator = "," | eol | "|" | "||" | ";" | redirection_op ;
 (* every non-item token is ignored; "," twice, or "," followed by ":" / "=" / "(-x)",
    is "expected parameter or flag"
    nu: parse_signatures.rs:680, 1206
-   here: src/parser/signature.rs::parse_params (a redirection token is an error) ; DIFF 54 *)
+   here: src/parser/signature.rs::parse_params (every non-item token skipped) *)
 
 param = param_head, [ ":", param_type ], [ "=", default ], { description_comment } ;
 (* mode machine Arg -> (":") Type -> AfterType -> ("=") DefaultValue -> Arg. ":" or "="
-   as the last token is "expected type" / "expected default value"; a second "=" after
-   a default is accepted (the second wins); a second ":" is an error; ":" or "=" with
-   no parameter before them is silently skipped
+   as the LAST token is "expected type" / "expected default value", but a comment
+   counts as a token, so `[x: # c\n]` is fine (no type) and `[x = # c\n y]` gives x the
+   default `y`; a second "=" after a default is accepted (the second wins); a second
+   ":" is an error; ":" or "=" with no parameter before them is silently skipped
    nu: parse_signatures.rs:641-694
    here: src/parser/signature.rs::parse_params (same modes and skips) *)
 
@@ -1082,29 +1155,33 @@ short_alias = "(-", short_char, ")" ;  (* a separate item after a flag: `--long 
 flag_name = ( identifier_byte | "-" ), { ( identifier_byte | "-" ) } ;
 decl_name = [ "$" ], identifier_byte, { identifier_byte } ;  (* digits, "?", ":", "@", "#" are allowed *)
 (* nu: parse_signatures.rs:948, 887, 919, 715, 805, 849; parse_helpers.rs:49 is_variable
-   here: src/parser/signature.rs::new_param, parse_params ; DIFF 34, 35, 37, 38 *)
+   here: src/parser/signature.rs::new_param, parse_params, check_params *)
 
 param_type = shape, [ "@", completer ] ;
-(* split at the FIRST "@" in the token regardless of "<" ">" nesting; an empty shape
-   before "@" is UnknownType; "bool" on a flag is "Type annotations are not allowed
-   for boolean switches"; a rest param's type becomes list<shape>
+(* split at the FIRST "@" in the token regardless of "<" ">" nesting (so
+   `record<a@b: int>` is an unclosed "<"); an empty shape before "@" is UnknownType;
+   "bool" on a flag is "Type annotations are not allowed for boolean switches"; a
+   rest param’s type becomes list<shape>
    nu: parse_signatures.rs:984
-   here: src/parser/signature.rs::parse_type_with_completer (splits outside "<>";
-   empty shape -> any) ; DIFF 36, 39 *)
+   here: src/parser/signature.rs::parse_type_with_completer *)
 completer = value ;
 (* parsed with OneOf(list<string>, string) and const-evaluated: a string must name an
-   existing command, a list is a static list; anything else is an error
+   existing command, a list is a static list; a "(..)" or "{..}" is an error
    nu: parse_shape_specs.rs:77 parse_completer
-   here: consumer (kept as the raw text after "@") *)
+   here: src/parser/signature.rs::check_completer (a string or a list); whether the
+   command exists (it may come from a `use`d module) and the const-evaluation:
+   consumer *)
 default = value ;
-(* parsed with the DECLARED shape (`x: int = abc` is a parse error), then const-evaluated;
-   an untyped flag with a default takes the default's type
-   nu: parse_signatures.rs:1085
-   here: src/parser/signature.rs::parse_params via value(Hint::Any); consumer *)
+(* parsed with the DECLARED shape (`x: int = abc`, `x: int = "a"`, `x: bool = 1`,
+   `x: list<int> = 1` are parse errors; `x: string = 1` is the string "1"), then
+   const-evaluated; an untyped flag with a default takes the default’s type
+   nu: parse_signatures.rs:1085; parse_expressions.rs:848 parse_value
+   here: src/parser/signature.rs::parse_params via value(Hint::Typed(shape)),
+   src/parser/value.rs::typed_value; the const-evaluation: consumer *)
 description_comment = comment ;
 (* attaches to the most recent parameter; several are joined with "\n"
    nu: parse_signatures.rs:1172
-   here: src/parser/signature.rs::parse_params (only the last is kept) *)
+   here: src/parser/signature.rs::parse_params (Param::description keeps them all) *)
 
 (* ==== 7.2 Type annotations (shapes) ==== *)
 
@@ -1139,7 +1216,8 @@ field_name = string ;  (* bare, quoted, numbers are fine *)
 (* "," tokens are skipped anywhere (",," and a leading "," are fine); ":" as the last
    token is "expected type after colon"
    nu: parse_shape_specs.rs:246 parse_named_type_params, 283
-   here: src/parser/signature.rs::named_type_params (rejects "," in key position) ; DIFF 53 *)
+   here: src/parser/signature.rs::named_type_params (the same skips; a non-item token
+   or a non-string key such as "true" is "annotation key not string") *)
 
 (* ==== 7.3 Input/output types ==== *)
 
@@ -1160,12 +1238,15 @@ type_items = shape ;
 (* the ":" must be GLUED to the name: `let x : int` is ExtraTokens, and `x:int` (no
    space) is a variable called "x:int" since ":" is an identifier byte. A name with a
    space or quote is VariableNotValid; "x:" as the last item before "=" is MissingType.
-   Every item between "x:" and "=" is concatenated and re-lexed as one signature-mode
-   span (so `record<a: int b: int>` with spaces works); only the first token is the
-   type. Reserved names are NameIsBuiltinVar.
-   nu: parse_signatures.rs:168 parse_var_with_opt_type, 196, 279; parse_bindings.rs:78
-   here: src/parser/statement.rs::variable_declaration, type_after_name
-   (reserved names: consumer) *)
+   Every item between "x:" and "=" (for `let`/`mut`/`const`) or "in" (for `for`, where
+   the positional ends at the keyword) is concatenated and re-lexed as one
+   signature-mode span (so `record<a: int, b: string>` with spaces works); only the
+   first token is the type, so `for x: int --help in [] {}` and `let x: int --help =
+   1` are UnknownType("int --help"). Reserved names are NameIsBuiltinVar.
+   nu: parse_signatures.rs:168 parse_var_with_opt_type, 196, 279; parse_bindings.rs:78;
+   parse_calls.rs:680 calculate_end_span
+   here: src/parser/statement.rs::variable_declaration, type_after_name, for_stmt,
+   check_variable_name (the reserved names) *)
 
 (* ==== 7.5 Import patterns ==== *)
 
@@ -1178,8 +1259,11 @@ member_list = "[", { string }, "]" ;  (* only last; non-string items are silentl
    WrongImportPattern; a `$var` member is SILENTLY IGNORED; anything after "*" or
    "[..]" is "... member can be only at the end of an import pattern"; a cell path
    on a list member (`[math].x`) is ignored
-   nu: parse_signatures.rs:20 parse_import_pattern, 69, 115
-   here: src/parser/statement.rs::use_stmt, use_member_list ; DIFF 19, DIFF 49 *)
+   After `use null` (a no-op) the members are parsed and then never looked at.
+   nu: parse_signatures.rs:20 parse_import_pattern, 69, 115; parse_module.rs:1163
+   here: src/parser/statement.rs::use_member (an ignored member is
+   UseMemberKind::Ignored; dropped list items and cell paths are ignored text),
+   use_member_list *)
 
 (* ==== 7.6 Match patterns ==== *)
 
@@ -1192,7 +1276,7 @@ pattern = "_"
    nu: parse_patterns.rs:22 parse_pattern
    here: src/parser/pattern.rs::parse_pattern *)
 
-variable_pattern = "$", identifier_byte, { identifier_byte } ;  (* reserved names are NameIsBuiltinVar (consumer) *)
+variable_pattern = "$", identifier_byte, { identifier_byte } ;  (* reserved names are NameIsBuiltinVar *)
 (* nu: parse_patterns.rs:91    here: src/parser/pattern.rs::variable_name *)
 
 value_pattern = value ;
@@ -1200,7 +1284,7 @@ value_pattern = value ;
    constants, "(const subexpression)"; a non-constant is a PARSE error. "..foo" is a
    plain string value pattern.
    nu: parse_patterns.rs:52
-   here: src/parser/pattern.rs::parse_pattern (no constant check: consumer) ; DIFF 29 *)
+   here: src/parser/pattern.rs::parse_pattern (the constant check: consumer) *)
 
 list_pattern = "[", { list_pattern_item }, "]" ;
 (* lexed with "\n\r," as whitespace, then LITE-PARSED: ";" is an explicit error, "|"
@@ -1208,18 +1292,21 @@ list_pattern = "[", { list_pattern_item }, "]" ;
 list_pattern_item = ".."  (* IgnoreRest; parsing STOPS here, later items are dropped *)
                     | "..$", identifier_byte, { identifier_byte }  (* Rest(var); parsing stops here too *)
                     | pattern ;
-(* nu: parse_patterns.rs:104, 140-180
-   here: src/parser/pattern.rs::list_pattern (a "|" is an error; items after the rest
-   are kept) ; DIFF 29, 30 *)
+(* a redirection token is dropped as in a list (5.14); an assignment-op item is a
+   string pattern and, as in every lite parse, so is everything after it
+   nu: parse_patterns.rs:104, 140-180
+   here: src/parser/pattern.rs::list_pattern over collections::lite_parts (the items
+   after the rest are ignored text) *)
 
 record_pattern = "{", { record_pattern_item }, "}" ;
 record_pattern_item = "$", identifier_byte, { identifier_byte }  (* shorthand: field bound to $name *)
                       | field_token, ":", pattern ;
-(* lexed with "\n\r," as whitespace and ":" special; the token after a field must be
-   ":" (so ";" or a missing ":" is "expected record"); the field text is taken
-   VERBATIM (quotes are not stripped)
+(* lexed with "\n\r," as whitespace and ":" special; EVERY token is a field token,
+   and the one after it must be ":" (so `{a: 1; b: 2}` is "expected record" because
+   the field ";" is followed by `b`, while `{; : 1}` parses); the field text is taken
+   VERBATIM (quotes are not stripped: `{"a": $x}` never matches a field `a`)
    nu: parse_patterns.rs:199, 232-256
-   here: src/parser/pattern.rs::record_pattern (quotes stripped; ";" dropped) ; DIFF 9, 41 *)
+   here: src/parser/pattern.rs::record_pattern *)
 
 (* ==== 7.7 Row conditions ==== *)
 
@@ -1247,7 +1334,7 @@ digit_8 = digit_2 | "2" | "3" | "4" | "5" | "6" | "7" ;
 digit_10 = digit ;
 digit_16 = digit | "a" | "b" | "c" | "d" | "e" | "f" | "A" | "B" | "C" | "D" | "E" | "F" ;
 hex = digit_16 ;
-radix_digit = digit_2 | digit_8 | digit_16 ;  (* the digits of the literal's own radix *)
+radix_digit = digit_2 | digit_8 | digit_16 ;  (* the digits of the literal’s own radix *)
 char = ? one UTF-8 encoded character ? ;
 short_char = char ;  (* for <short-flag-param> it must also be an <identifier-byte> *)
 any_chars = { ? any byte ? } ;

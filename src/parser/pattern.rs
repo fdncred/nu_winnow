@@ -10,8 +10,10 @@ use crate::span::{Span, Spanned};
 
 use super::cellpath::is_identifier;
 use super::cursor::Cursor;
+use super::expr::Position;
+use super::statement::check_variable_name;
 use super::value::{self, Hint, interior};
-use super::{St, expr, strings};
+use super::{St, collections, expr};
 
 /// Parse the `{ pattern => body, ... }` item of a `match`.
 pub fn match_block<'a>(st: St<'_, 'a>, span: Span) -> PResult<(Span, Vec<MatchArm<'a>>)> {
@@ -68,7 +70,7 @@ fn match_arm<'a>(st: St<'_, 'a>, c: &mut Cursor<'_>) -> PResult<MatchArm<'a>> {
     let body_tok = c.expect_item("match arm body")?;
     let body = match st.tok(&body_tok).starts_with('{') {
         true => value::value(st, body_tok.span, Hint::MatchBody)?,
-        false => expr::parse_expression(st, c.slice(c.position() - 1..c.position()))?,
+        false => expr::parse_expression(st, c.slice(c.position() - 1..c.position()), Position::Element)?,
     };
     Ok(MatchArm { span: pattern.span.merge(body.span), pattern, guard, arrow, body })
 }
@@ -90,41 +92,73 @@ pub fn parse_pattern<'a>(st: St<'_, 'a>, tok: &Token) -> PResult<Pattern<'a>> {
     Ok(Pattern { span, kind })
 }
 
+/// The name of a `$var` pattern, which binds a variable and so may not be a
+/// reserved name.
 fn variable_name<'a>(st: St<'_, 'a>, span: Span) -> PResult<&'a str> {
     let name = st.text(span).strip_prefix('$').unwrap_or_default();
     if !is_identifier(name) {
         return Err(cut(Diagnostic::expected("valid variable name", span)));
     }
+    check_variable_name(name, span)?;
     Ok(name)
 }
 
+/// `[p1, p2, ..$rest]`. Like nu, the interior is lite-parsed: `|` separates
+/// groups (`[1 | 2]` is `[1, 2]`), a redirection is dropped, and the items
+/// after a `..`/`..$rest` in the same group are dropped too.
 fn list_pattern<'a>(st: St<'_, 'a>, span: Span) -> PResult<Vec<Pattern<'a>>> {
     let inner = interior(st, span, "[", "]")?;
     let tokens = st.lex_span(inner, LexOptions::PATTERN_LIST).map_err(cut)?;
     st.comments_from(&tokens);
-    tokens
-        .iter()
-        .filter(|t| !matches!(t.kind, TokenKind::Eof | TokenKind::Comment))
-        .map(|tok| {
+    let tokens: Vec<Token> =
+        tokens.into_iter().filter(|t| !matches!(t.kind, TokenKind::Eof | TokenKind::Comment)).collect();
+    if let Some(tok) = tokens.iter().find(|t| t.kind == TokenKind::Semicolon) {
+        return Err(cut(Diagnostic::message("unexpected semicolon in list pattern", tok.span)
+            .with_help("use commas or whitespace to separate list items")));
+    }
+    let mut out = Vec::new();
+    for group in collections::lite_parts(st, &tokens)? {
+        let mut idx = 0;
+        while let Some(tok) = group.get(idx) {
+            idx += 1;
             let text = st.tok(tok);
-            match text.strip_prefix("..").filter(|_| !text.starts_with("...")) {
-                Some("") => Ok(Pattern { span: tok.span, kind: PatternKind::Rest(None) }),
-                Some(_) => {
+            let rest = match text.strip_prefix("..").filter(|_| !text.starts_with("...")) {
+                Some("") => Some(PatternKind::Rest(None)),
+                Some(name) if name.starts_with('$') => {
                     let name_span = Span::new(tok.span.start + 2, tok.span.end);
                     let name = variable_name(st, name_span)?;
-                    Ok(Pattern { span: tok.span, kind: PatternKind::Rest(Some(Spanned::new(name, name_span))) })
+                    Some(PatternKind::Rest(Some(Spanned::new(name, name_span))))
                 }
-                None => parse_pattern(st, tok),
+                _ => None,
+            };
+            match rest {
+                Some(kind) => {
+                    out.push(Pattern { span: tok.span, kind });
+                    // nu stops reading the group here.
+                    for ignored in &group[idx..] {
+                        st.ignore(ignored.span);
+                    }
+                    break;
+                }
+                None => out.push(parse_pattern(st, &Token { kind: TokenKind::Item, span: tok.span })?),
             }
-        })
-        .collect()
+        }
+    }
+    Ok(out)
 }
 
+/// `{key: pattern, $shorthand}`. Like nu, every token is a field name, kept
+/// verbatim (`{"a": $x}` has the field `"a"`, quotes included), and must be
+/// followed by `:` and a pattern.
 fn record_pattern<'a>(st: St<'_, 'a>, span: Span) -> PResult<Vec<(Spanned<Cow<'a, str>>, Pattern<'a>)>> {
     let inner = interior(st, span, "{", "}")?;
     let tokens = st.lex_span(inner, LexOptions::PATTERN_RECORD).map_err(cut)?;
     st.comments_from(&tokens);
-    let items: Vec<Token> = tokens.into_iter().filter(|t| t.kind == TokenKind::Item).collect();
+    let items: Vec<Token> = tokens
+        .into_iter()
+        .filter(|t| !matches!(t.kind, TokenKind::Eof | TokenKind::Comment))
+        .map(|t| Token { kind: TokenKind::Item, span: t.span })
+        .collect();
     let mut c = Cursor::new(&items, inner.end);
     let mut out = Vec::new();
     while let Some(tok) = c.next() {
@@ -135,10 +169,13 @@ fn record_pattern<'a>(st: St<'_, 'a>, span: Span) -> PResult<Vec<(Spanned<Cow<'a
             out.push((Spanned::new(Cow::Borrowed(name), tok.span), pattern));
             continue;
         }
-        let field = strings::string_lit(st, tok.span)?.value;
+        let field = Cow::Borrowed(st.tok(tok));
         match c.next() {
             Some(colon) if st.tok(colon) == ":" => {}
-            _ => return Err(cut(Diagnostic::expected("`:` after field name in record pattern", c.here()))),
+            _ => {
+                return Err(cut(Diagnostic::expected("record", span)
+                    .with_help("record patterns look like `{key: pattern}`; a `:` must follow the field name")));
+            }
         }
         let pattern = parse_pattern(st, &c.expect_item("pattern for record field")?)?;
         out.push((Spanned::new(field, tok.span), pattern));

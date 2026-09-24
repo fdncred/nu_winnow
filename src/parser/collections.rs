@@ -1,90 +1,206 @@
 //! Lists, tables and records.
 
-use crate::ast::{Expr, ExprKind, InterpPart, ListItem, Quote, RecordItem, StringLit, Table};
+use crate::ast::{Expr, ExprKind, InterpPart, ListItem, Quote, RecordItem, Table, TypeKind};
 use crate::error::{Diagnostic, ErrorKind};
 use crate::input::{PResult, cut};
-use crate::lexer::{LexOptions, Token, TokenKind, lex_prefix_at};
+use crate::lexer::{LexOptions, RedirectSource, Token, TokenKind, lex_prefix_at};
 use crate::span::Span;
 
 use super::St;
 use super::value::{self, Hint, interior, is_spread};
 
-/// Parse `[ ... ]` as a list or, when it is `[[cols]; [row] ...]`, a table.
-pub fn list_or_table<'a>(st: St<'_, 'a>, span: Span) -> PResult<Expr<'a>> {
+/// nu's lite parse of the tokens inside `[...]`: the items of each
+/// `|`-separated command. A redirection and its target are dropped from the
+/// items as nu drops them (`[a o> b]` is `[a]`) and recorded as ignored text;
+/// a redirection with nothing before it, a missing target, a second
+/// redirection of the same stream, `||` and a `|` at the end are errors.
+/// After an assignment operator everything is an item (`[a = b | c]` has
+/// five). `;` is left to the caller, which has already refused it.
+pub fn lite_parts(st: St<'_, '_>, tokens: &[Token]) -> PResult<Vec<Vec<Token>>> {
+    #[derive(Clone, Copy)]
+    enum Redirected {
+        None,
+        Single(RedirectSource),
+        Separate,
+    }
+    if let Some(last) = tokens.last().filter(|t| t.kind == TokenKind::Pipe) {
+        return Err(cut(Diagnostic::new(ErrorKind::UnexpectedEof("list item after `|`"), last.span)));
+    }
+    let mut groups: Vec<Vec<Token>> = Vec::new();
+    let mut parts: Vec<Token> = Vec::new();
+    let mut redirected = Redirected::None;
+    let mut assignment = false;
+    let mut idx = 0;
+    while let Some(tok) = tokens.get(idx) {
+        idx += 1;
+        match tok.kind {
+            TokenKind::Assign(_) => {
+                assignment = true;
+                parts.push(*tok);
+            }
+            _ if assignment => parts.push(*tok),
+            TokenKind::Item => parts.push(*tok),
+            TokenKind::PipePipe => {
+                return Err(cut(Diagnostic::new(ErrorKind::ShellSyntax { found: "||", use_instead: "or" }, tok.span)));
+            }
+            TokenKind::Pipe => {
+                groups.push(std::mem::take(&mut parts));
+                redirected = Redirected::None;
+            }
+            TokenKind::Redirect(op) => {
+                if parts.is_empty() {
+                    return Err(cut(Diagnostic::message("unexpected redirection: nothing to redirect", tok.span)));
+                }
+                redirected = match (redirected, op.source()) {
+                    (Redirected::None, source) => Redirected::Single(source),
+                    (Redirected::Single(RedirectSource::Stdout), RedirectSource::Stderr)
+                    | (Redirected::Single(RedirectSource::Stderr), RedirectSource::Stdout) => Redirected::Separate,
+                    _ => {
+                        return Err(cut(Diagnostic::message("multiple redirections of the same stream", tok.span)));
+                    }
+                };
+                st.ignore(tok.span);
+                if op.is_pipe() {
+                    groups.push(std::mem::take(&mut parts));
+                    redirected = Redirected::None;
+                    continue;
+                }
+                match tokens.get(idx) {
+                    Some(target) if target.kind == TokenKind::Item => {
+                        st.ignore(target.span);
+                        idx += 1;
+                    }
+                    _ => return Err(cut(Diagnostic::expected("redirection target", tok.span.past()))),
+                }
+            }
+            TokenKind::Comment | TokenKind::Eol | TokenKind::Semicolon | TokenKind::Eof => {}
+        }
+    }
+    groups.push(parts);
+    Ok(groups)
+}
+
+/// The tokens of a `[...]` interior, comments recorded and dropped.
+fn bracket_tokens(st: St<'_, '_>, span: Span) -> PResult<Vec<Token>> {
     let inner = interior(st, span, "[", "]")?;
     let tokens = st.lex_span(inner, LexOptions::LIST).map_err(cut)?;
     st.comments_from(&tokens);
-    let items: Vec<Token> = tokens
-        .into_iter()
-        .filter(|t| !matches!(t.kind, TokenKind::Comment | TokenKind::Eol | TokenKind::Eof))
-        .collect();
+    Ok(tokens.into_iter().filter(|t| !matches!(t.kind, TokenKind::Comment | TokenKind::Eol | TokenKind::Eof)).collect())
+}
+
+/// Like nu, a `;` between list items is an error (only `[[cols]; [row]]` has one).
+fn refuse_semicolon(items: &[Token], what: &'static str) -> PResult<()> {
+    match items.iter().find(|t| t.kind == TokenKind::Semicolon) {
+        Some(tok) => Err(cut(Diagnostic::message(format!("unexpected semicolon in {what}"), tok.span)
+            .with_help("use commas or whitespace to separate list items"))),
+        None => Ok(()),
+    }
+}
+
+/// Parse `[ ... ]` as a list or, when it is `[[cols]; [row] ...]`, a table.
+pub fn list_or_table<'a>(st: St<'_, 'a>, span: Span) -> PResult<Expr<'a>> {
+    list_or_table_typed(st, span, None)
+}
+
+/// [`list_or_table`] with the items parsed as `elem` (`list<int>` defaults).
+pub fn list_or_table_typed<'a>(st: St<'_, 'a>, span: Span, elem: Option<&TypeKind<'a>>) -> PResult<Expr<'a>> {
+    let items = bracket_tokens(st, span)?;
     if let [first, second, rows @ ..] = items.as_slice()
         && first.kind == TokenKind::Item
         && st.tok(first).starts_with('[')
         && second.kind == TokenKind::Semicolon
-        && !rows.is_empty()
     {
-        return table(st, span, first, rows);
+        return table(st, span, first, second, rows);
     }
-    // Nushell tolerates `|` and `;` between list items, but not a `|` at the end.
-    if let Some(last) = items.last()
-        && matches!(last.kind, TokenKind::Pipe | TokenKind::PipePipe)
-    {
-        return Err(cut(Diagnostic::new(ErrorKind::UnexpectedEof("list item after `|`"), last.span)));
-    }
+    refuse_semicolon(&items, "list")?;
     let mut out = Vec::with_capacity(items.len());
-    for tok in &items {
-        if !matches!(tok.kind, TokenKind::Semicolon | TokenKind::Pipe | TokenKind::PipePipe) {
-            out.push(list_item(st, tok)?);
+    for group in lite_parts(st, &items)? {
+        for tok in &group {
+            out.push(list_item(st, tok, elem)?);
         }
     }
     Ok(Expr::new(ExprKind::List(out), span))
 }
 
-fn table<'a>(st: St<'_, 'a>, span: Span, columns: &Token, rows: &[Token]) -> PResult<Expr<'a>> {
+/// `[[cols]; [row] ...]`: every row must be a list with as many items as
+/// there are columns, and every column name must be a string.
+fn table<'a>(st: St<'_, 'a>, span: Span, columns: &Token, semicolon: &Token, rows: &[Token]) -> PResult<Expr<'a>> {
     let columns = list_row(st, columns.span)?;
+    if rows.is_empty() {
+        return Err(cut(Diagnostic::expected("table row", semicolon.span.past())));
+    }
+    let ExprKind::List(column_items) = &columns.kind else { unreachable!("list_row returns a list") };
+    let width = column_items.len();
     let rows = rows
         .iter()
-        .map(|tok| match tok.kind {
-            TokenKind::Item if st.tok(tok).starts_with('[') => list_row(st, tok.span),
-            _ => Err(cut(Diagnostic::expected("table row", tok.span).with_help("all table rows must be lists"))),
+        .map(|tok| {
+            if tok.kind != TokenKind::Item || !st.tok(tok).starts_with('[') {
+                return Err(cut(Diagnostic::message("table item not list", tok.span)
+                    .with_help("all table items must be lists")));
+            }
+            let row = list_row(st, tok.span)?;
+            let ExprKind::List(items) = &row.kind else { unreachable!("list_row returns a list") };
+            match items.len().cmp(&width) {
+                std::cmp::Ordering::Less => Err(cut(Diagnostic::message("missing columns", tok.span)
+                    .with_help(format!("expected {width} columns, found {}", items.len())))),
+                std::cmp::Ordering::Greater => {
+                    let extra = items[width].span().merge(items[items.len() - 1].span());
+                    Err(cut(Diagnostic::message("extra columns", extra)
+                        .with_help(format!("expected {width} columns, found {}", items.len()))))
+                }
+                std::cmp::Ordering::Equal => Ok(row),
+            }
         })
         .collect::<PResult<Vec<_>>>()?;
+    for column in column_items {
+        let ListItem::Item(expr) = column else { unreachable!("list_row refuses spreads") };
+        let stringy = matches!(
+            expr.kind,
+            ExprKind::String(_)
+                | ExprKind::Interpolation(_)
+                | ExprKind::Var(_)
+                | ExprKind::FullCellPath(_)
+                | ExprKind::Subexpression(_)
+        );
+        if !stringy {
+            return Err(cut(Diagnostic::message("table column name not string", expr.span)
+                .with_help("table column names should be able to be converted into strings")));
+        }
+    }
     Ok(Expr::new(ExprKind::Table(Table { columns: Box::new(columns), rows }), span))
 }
 
-fn list_item<'a>(st: St<'_, 'a>, tok: &Token) -> PResult<ListItem<'a>> {
-    match tok.kind {
-        TokenKind::Item => {}
-        // `[Assignment, =, Assign]`: an operator on its own is just a word here.
-        TokenKind::Assign(_) | TokenKind::Redirect(_) => {
-            return Ok(ListItem::Item(Expr::new(ExprKind::String(StringLit::bare(st.tok(tok))), tok.span)));
-        }
-        _ => return Err(cut(Diagnostic::expected("list item", tok.span))),
-    }
+fn list_item<'a>(st: St<'_, 'a>, tok: &Token, elem: Option<&TypeKind<'a>>) -> PResult<ListItem<'a>> {
     let text = st.tok(tok);
-    if is_spread(text, b"[$(") {
+    if tok.kind == TokenKind::Item && is_spread(text, b"[$(") {
         let dots = Span::new(tok.span.start, tok.span.start + 3);
         let expr = value::value(st, Span::new(tok.span.start + 3, tok.span.end), Hint::Any)?;
         return Ok(ListItem::Spread { dots, expr });
     }
-    Ok(ListItem::Item(value::value(st, tok.span, Hint::Any)?))
+    // `[Assignment, =, Assign]`: an operator on its own is just a word here,
+    // and so is anything after it (`[a = b | c]`).
+    if tok.kind != TokenKind::Item {
+        return Ok(ListItem::Item(Expr::new(ExprKind::String(crate::ast::StringLit::bare(text)), tok.span)));
+    }
+    let hint = match elem {
+        Some(kind) => Hint::Typed(kind),
+        None => Hint::Any,
+    };
+    Ok(ListItem::Item(value::value(st, tok.span, hint)?))
 }
 
 /// A table header or row: a list without spreads.
 fn list_row<'a>(st: St<'_, 'a>, span: Span) -> PResult<Expr<'a>> {
-    let inner = interior(st, span, "[", "]")?;
-    let tokens = st.lex_span(inner, LexOptions::LIST).map_err(cut)?;
-    st.comments_from(&tokens);
+    let items = bracket_tokens(st, span)?;
+    refuse_semicolon(&items, "list")?;
     let mut out = Vec::new();
-    for tok in tokens
-        .iter()
-        .filter(|t| !matches!(t.kind, TokenKind::Eof | TokenKind::Comment | TokenKind::Semicolon | TokenKind::Pipe))
-    {
-        match list_item(st, tok)? {
-            item @ ListItem::Item(_) => out.push(item),
-            ListItem::Spread { dots, .. } => {
-                return Err(cut(Diagnostic::message("cannot spread in a table row", dots)));
+    for group in lite_parts(st, &items)? {
+        for tok in &group {
+            match list_item(st, tok, None)? {
+                item @ ListItem::Item(_) => out.push(item),
+                ListItem::Spread { dots, .. } => {
+                    return Err(cut(Diagnostic::message("cannot spread in a table row", dots)));
+                }
             }
         }
     }
@@ -94,7 +210,8 @@ fn list_row<'a>(st: St<'_, 'a>, span: Span) -> PResult<Expr<'a>> {
 /// Parse `{ key: value, ...$spread }`.
 ///
 /// Entries are lexed one at a time: the key with `:` as a special character
-/// (so `a:1` splits), the value without (so `http://x` stays whole).
+/// (so `a:1` splits), the value without (so `http://x` stays whole). Like nu,
+/// a key or a value must be an item: `{a: =}` and `{a: o>}` are errors.
 pub fn record<'a>(st: St<'_, 'a>, span: Span) -> PResult<Expr<'a>> {
     let inner = interior(st, span, "{", "}")?;
     let text = st.text(inner);
@@ -106,9 +223,6 @@ pub fn record<'a>(st: St<'_, 'a>, span: Span) -> PResult<Expr<'a>> {
             match tokens.first() {
                 None => return Ok(None),
                 Some(tok) if tok.kind == TokenKind::Comment => st.comment(tok.span),
-                Some(tok) if matches!(tok.kind, TokenKind::Assign(_) | TokenKind::Redirect(_)) => {
-                    return Ok(Some(Token { kind: TokenKind::Item, span: tok.span }));
-                }
                 Some(tok) => return Ok(Some(*tok)),
             }
         }
@@ -116,7 +230,8 @@ pub fn record<'a>(st: St<'_, 'a>, span: Span) -> PResult<Expr<'a>> {
     let mut items = Vec::new();
     while let Some(key_tok) = next(LexOptions::RECORD_KEY)? {
         if key_tok.kind != TokenKind::Item {
-            return Err(cut(Diagnostic::expected("record key", key_tok.span)));
+            return Err(cut(Diagnostic::message("unexpected token in record", key_tok.span)
+                .with_help("expected a record key here; fields look like `key: value`")));
         }
         let key_text = st.tok(&key_tok);
         if is_spread(key_text, b"{$(") {
@@ -124,10 +239,6 @@ pub fn record<'a>(st: St<'_, 'a>, span: Span) -> PResult<Expr<'a>> {
             let expr = value::value(st, Span::new(key_tok.span.start + 3, key_tok.span.end), Hint::Any)?;
             items.push(RecordItem::Spread { dots, expr });
             continue;
-        }
-        if matches!(key_text, "true" | "false" | "null") {
-            return Err(cut(Diagnostic::expected("string", key_tok.span)
-                .with_help(format!("`{key_text}` is a value; quote it to use it as a record key"))));
         }
         let key = value::value(st, key_tok.span, Hint::String)?;
         check_bare_colon(st, &key, "key")?;
@@ -145,8 +256,11 @@ pub fn record<'a>(st: St<'_, 'a>, span: Span) -> PResult<Expr<'a>> {
         };
         let value = match next(LexOptions::RECORD_VALUE)? {
             Some(tok) if tok.kind == TokenKind::Item => value::value(st, tok.span, Hint::Any)?,
-            Some(tok) => return Err(cut(Diagnostic::expected("record value", tok.span))),
-            None => return Err(cut(Diagnostic::expected("record value", colon.span.past()))),
+            Some(tok) => {
+                return Err(cut(Diagnostic::message("unexpected token in record value", tok.span)
+                    .with_help("after `key:`, provide a value (string, number, record, list, ...)")));
+            }
+            None => return Err(cut(Diagnostic::expected("value for record field", colon.span.past()))),
         };
         check_bare_colon(st, &value, "value")?;
         items.push(RecordItem::Pair { key, colon: colon.span, value });

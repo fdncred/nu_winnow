@@ -1,0 +1,7 @@
+Block 0..11
+  Pipeline 0..1 comments=1
+    Call `a` 0..1
+  Pipeline 9..10
+    Call `b` 9..10
+Comments (1)
+  4..7 "# c"

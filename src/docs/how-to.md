@@ -218,15 +218,20 @@ nu tools/scripts/verify.nu --save tools/scripts/verify-history.nuon
 | `flatcmp.nu` | nu's `ast --flatten` vs ours over nu-std | only the documented differences |
 | `nufmt-fixtures.nu` | the formatter vs the nushell/nufmt reference fixtures | 111 of 130 |
 
-Scoreboard on 2026-09-21 against Nushell `af4001096` (main) and `nu` 0.115.2
-(`tools/scripts/verify-history.nuon` keeps the record): 1,348 tests, 0
-failures; 882 fixtures, 0 with `ours != expected` (9 where `nu-check`
-rejects for semantic reasons); differential originals 5,378 compared, 0
-`ours_rejects`, 0 `nu_syntax_rejects`, 287 semantic, 0 panics; mutants
-16,134 compared, 5 `ours_rejects`, 5 `nu_syntax_rejects`, 39 known, 0
+Scoreboard on 2026-09-24 against the Nushell checkout `d7cb4e589` (main,
+harness built with the `[patch]` block) and `nu` 0.115.2
+(`tools/scripts/verify-history.nuon` keeps the record): 1,756 tests, 0
+failures; 1,280 fixtures, 0 with `ours != expected` (17 where `nu-check`
+rejects for semantic reasons); differential originals 5,776 compared, 5
+`ours_rejects`, 0 `nu_syntax_rejects`, 286 semantic, 0 panics; mutants
+17,328 compared, 13 `ours_rejects`, 2 `nu_syntax_rejects`, 8 known, 0
 panics; nucheck-compare 1,599 files, 0 accepted by nu and rejected here;
 flatcmp 125 differing runs over nu-std (the documented signature-dependent
-ones); nufmt reference fixtures 111 of 130.
+ones); nufmt reference fixtures 111 of 130. Every `ours_rejects` row is a
+`plugin use` snippet (the harness registers no plugin commands, so they are
+external calls for it; `fixtures-compare` with the real `nu` agrees with
+this parser), and the two `nu_syntax_rejects` mutants need a module
+(`use eggs foo foo`) or a signature (`skip 0x[01]`).
 
 When a number moves, `differential --details` and `fixtures-compare
 --details` say which input and why. When Nushell adds syntax, the

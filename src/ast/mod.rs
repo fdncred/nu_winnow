@@ -38,6 +38,14 @@ pub struct Ast<'a> {
     pub comments: Vec<Comment>,
     /// The span of a leading `#!` line, if present. It is also in `comments`.
     pub shebang: Option<Span>,
+    /// Source text that nu-parser accepts but silently discards, in source
+    /// order: the redirection of `[a o> b]`, the items after `..` in a list
+    /// pattern, a block before the body of a `def` (`def f [] {} { }`), the
+    /// body of an `extern`, the items after the block of `export-env`, the
+    /// default values of an `extern` signature, a `--` after a keyword. They
+    /// are not in the tree; a consumer that reproduces the source splices
+    /// them back in by span.
+    pub ignored: Vec<Span>,
 }
 
 impl<'a> Ast<'a> {
@@ -1288,8 +1296,9 @@ pub struct Param<'a> {
     pub default: Option<Expr<'a>>,
     /// A custom completer after `@` in the type.
     pub completer: Option<Spanned<&'a str>>,
-    /// The `# description` comment following the parameter.
-    pub description: Option<Comment>,
+    /// The `# description` comments following the parameter, in source order
+    /// (nu joins them with newlines).
+    pub description: Vec<Comment>,
 }
 
 /// The kinds of parameter.
@@ -1372,6 +1381,10 @@ pub struct Def<'a> {
     pub name: Spanned<Cow<'a, str>>,
     /// The signature.
     pub signature: Signature<'a>,
+    /// `|x|` parameters written on the body (`def f [] {|x| }`): nu-parser
+    /// parses the body as a closure and then replaces its parameters with
+    /// `signature`, so these have no effect.
+    pub body_params: Option<Signature<'a>>,
     /// The body.
     pub body: Block<'a>,
 }
@@ -1394,8 +1407,9 @@ pub struct Alias<'a> {
     pub name: Spanned<Cow<'a, str>>,
     /// The span of the `=`.
     pub eq: Span,
-    /// The aliased command.
-    pub value: Box<Expr<'a>>,
+    /// The aliased command. `None` only for `export alias x =`, which nu
+    /// accepts through a quirk of its length check (`alias x =` is an error).
+    pub value: Option<Box<Expr<'a>>>,
 }
 
 /// A member selector in a `use` statement.
@@ -1418,6 +1432,10 @@ pub enum UseMemberKind<'a> {
     Glob,
     /// `[a b c]`.
     List(Vec<Spanned<Cow<'a, str>>>),
+    /// A member nu-parser parses and then ignores: a variable, a
+    /// subexpression or a record (`use std $x`, `use std (foo)`), or anything
+    /// at all after `use null`.
+    Ignored(Box<Expr<'a>>),
 }
 
 /// `use module members`.
@@ -1504,6 +1522,10 @@ pub struct Match<'a> {
     pub block_span: Span,
     /// The arms.
     pub arms: Vec<MatchArm<'a>>,
+    /// The `{ ... }` when it is a closure or a record rather than arms
+    /// (`match 1 {|x| }`, `match 1 {a: 1}`): nu-parser accepts it as a value
+    /// and the match fails at run time. `arms` is empty then.
+    pub value_block: Option<Box<Expr<'a>>>,
 }
 
 /// A match pattern.

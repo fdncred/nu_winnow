@@ -14,7 +14,7 @@
 #   cargo build --release --example parse
 #   (cd tools/nushell-harness; cargo build --release --bin nu-parser-check)
 #   nu tools/scripts/fixtures-compare.nu
-#   nu tools/scripts/fixtures-compare.nu --details | where nu != expected
+#   nu tools/scripts/fixtures-compare.nu --details | where {|r| $r.nu != $r.expected }
 
 # One verdict per fixture from nu-winnow-parser.
 def ours-verdicts [parse: path, files: list<path>]: nothing -> list<bool> {
@@ -65,21 +65,21 @@ export def main [
     if $details {
         return $rows
     }
-    let ours_wrong = $rows | where ours != expected
-    let nu_wrong = $rows | where nu != expected
-    let main_wrong = $rows | where main != null and main != expected
-    let ours_vs_nu = $rows | where ours != nu
+    let ours_wrong = $rows | where {|r| $r.ours != $r.expected }
+    let nu_wrong = $rows | where {|r| $r.nu != $r.expected }
+    let main_wrong = $rows | where {|r| $r.main != null and $r.main != $r.expected }
+    let ours_vs_nu = $rows | where {|r| $r.ours != $r.nu }
     print $"($rows | length) fixtures: ours disagrees with the expected verdict on ($ours_wrong | length), nu on ($nu_wrong | length), nushell-main on ($main_wrong | length); ours and nu disagree on ($ours_vs_nu | length)"
     if ($ours_vs_nu | is-not-empty) {
         print "ours and nu disagree:"
         print ($ours_vs_nu | select file expected ours nu main main_error | table -e)
     }
-    let nu_only = $nu_wrong | where ours == expected
+    let nu_only = $nu_wrong | where {|r| $r.ours == $r.expected }
     if ($nu_only | is-not-empty) {
         print "nu disagrees with the expected verdict where ours agrees (usually semantic errors: unknown variables, missing files, types):"
         print ($nu_only | select file expected ours nu main main_error | table -e)
     }
-    let main_only = $main_wrong | where nu == expected
+    let main_only = $main_wrong | where {|r| $r.nu == $r.expected }
     if ($main_only | is-not-empty) {
         print "nushell-main disagrees with nu on:"
         print ($main_only | select file expected ours nu main main_error | table -e)

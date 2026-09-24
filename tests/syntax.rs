@@ -673,7 +673,7 @@ fn multiword_commands_and_flags() {
         ]
     );
     kind!(c.flag("char").unwrap().value.as_ref().unwrap(), ExprKind::String(_));
-    let ast = ok("into int | date to-timezone utc | attr example");
+    let ast = ok("into int | date to-timezone utc | attr example x y");
     let names: Vec<_> = elements(&ast).iter().map(|e| call(&e.expr).head.name.to_string()).collect();
     assert_eq!(names, vec!["into int", "date to-timezone", "attr example"]);
 }
@@ -842,30 +842,30 @@ fn assignments() {
 
 #[test]
 fn def_forms() {
-    let src = "def --env --wrapped \"my cmd\" [\n  a: int, # the a\n  b?: string = \"x\"\n  --flag(-f): int = 3\n  -s\n  --long (-l)\n  ...rest: any\n  name: string@completer\n]: [int -> string, nothing -> nothing] {\n  $a\n}";
+    let src = "def --env --wrapped \"my cmd\" [\n  a: int, # the a\n  name: string@completer\n  b?: string = \"x\"\n  --flag(-f): int = 3\n  -s\n  --long (-l)\n  ...rest: string\n]: [int -> string, nothing -> nothing] {\n  $a\n}";
     let ast = ok(src);
     let d = kind!(expr(&ast), ExprKind::Def(d) => d);
     assert_eq!(d.name.item, "my cmd");
     assert_eq!(d.flags.iter().map(|f| f.item).collect::<Vec<_>>(), vec![DefFlag::Env, DefFlag::Wrapped]);
     let sig = &d.signature;
     let names: Vec<_> = sig.params.iter().map(|p| p.name.item).collect();
-    assert_eq!(names, vec!["a", "b", "flag", "s", "long", "rest", "name"]);
+    assert_eq!(names, vec!["a", "name", "b", "flag", "s", "long", "rest"]);
     assert!(matches!(sig.params[0].kind, ParamKind::Positional { optional: false }));
-    assert_eq!(sig.params[0].description.unwrap().body(src), "the a");
-    assert!(matches!(sig.params[1].kind, ParamKind::Positional { optional: true }));
-    assert!(sig.params[1].default.is_some());
-    match &sig.params[2].kind {
+    assert_eq!(sig.params[0].description[0].body(src), "the a");
+    assert_eq!(sig.params[1].completer.unwrap().item, "completer");
+    assert!(matches!(sig.params[2].kind, ParamKind::Positional { optional: true }));
+    assert!(sig.params[2].default.is_some());
+    match &sig.params[3].kind {
         ParamKind::Flag { long, short } => {
             assert_eq!(long.unwrap().item, "flag");
             assert_eq!(short.unwrap().item, 'f');
         }
         other => panic!("{other:?}"),
     }
-    kind!(sig.params[2].default.as_ref().unwrap(), ExprKind::Int(3));
-    assert!(matches!(sig.params[3].kind, ParamKind::Flag { long: None, short: Some(_) }));
-    assert!(matches!(sig.params[4].kind, ParamKind::Flag { long: Some(_), short: Some(_) }));
-    assert!(matches!(sig.params[5].kind, ParamKind::Rest));
-    assert_eq!(sig.params[6].completer.unwrap().item, "completer");
+    kind!(sig.params[3].default.as_ref().unwrap(), ExprKind::Int(3));
+    assert!(matches!(sig.params[4].kind, ParamKind::Flag { long: None, short: Some(_) }));
+    assert!(matches!(sig.params[5].kind, ParamKind::Flag { long: Some(_), short: Some(_) }));
+    assert!(matches!(sig.params[6].kind, ParamKind::Rest));
     assert_eq!(sig.io_types.len(), 2);
     assert!(matches!(sig.io_types[0].input.kind, TypeKind::Int));
     assert!(matches!(sig.io_types[1].output.kind, TypeKind::Nothing));
@@ -917,11 +917,11 @@ fn extern_alias_module_use_export() {
     let ast = ok("alias ll = ls -l");
     let a = kind!(expr(&ast), ExprKind::Alias(a) => a);
     assert_eq!(a.name.item, "ll");
-    assert_eq!(call(&a.value).head.name, "ls");
+    assert_eq!(call(a.value.as_ref().unwrap()).head.name, "ls");
     // Nushell accepts a pipe here and treats it as a word.
     let ast = ok("alias ll = ls | length");
     let a = kind!(expr(&ast), ExprKind::Alias(a) => a);
-    assert_eq!(call(&a.value).args.len(), 2);
+    assert_eq!(call(a.value.as_ref().unwrap()).args.len(), 2);
     let ast = ok(
         "module m {\n  export def f [] { 2 }\n  export const c = 1\n  export-env { $env.A = 1 }\n  export alias g = f\n  export use other *\n  export module inner { }\n  export extern e []\n}",
     );

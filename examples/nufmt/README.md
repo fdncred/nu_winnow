@@ -176,7 +176,7 @@ let def = &ast.block.pipelines[1];
 assert_eq!(def.leading_comments[0].body(src), "doc for def");    // the blank line dropped `detached`
 match &def.elements[0].expr.kind {
     nu_winnow_parser::ast::ExprKind::Def(d) => {
-        assert_eq!(d.signature.params[0].description.unwrap().body(src), "the x");
+        assert_eq!(d.signature.params[0].description[0].body(src), "the x");
     }
     _ => unreachable!(),
 }

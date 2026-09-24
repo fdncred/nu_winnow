@@ -55,7 +55,7 @@ Block 0..244
         Call `shorthands` 162..172
       Arm 175..203
         Pattern record 175..193
-          Field "quoted key"
+          Field "\"quoted key\""
             Pattern $q 190..192
         Call `quoted` 197..203
       Arm 206..241
