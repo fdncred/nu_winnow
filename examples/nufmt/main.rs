@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use nu_winnow_parser::LineIndex;
-use nu_winnow_parser::ast::{ExprKind, RecordItem};
+use nu_winnow_parser::ast::{Expr, RecordItem};
 
 use format::{IndentChar, Note, Options, format_with_notes};
 
@@ -34,8 +34,8 @@ fn load_config(path: &Path, options: &mut Options) -> Result<(), String> {
     let ast = nu_winnow_parser::parse(&src).map_err(|e| e.render(&src, Some(&name)))?;
     let items = match ast.block.pipelines.as_slice() {
         [p] => match p.elements.as_slice() {
-            [e] => match &e.expr.kind {
-                ExprKind::Record(items) => items,
+            [e] => match &e.expr.expr {
+                Expr::Record(items) => items,
                 _ => return Err(format!("{name}: expected a record")),
             },
             _ => return Err(format!("{name}: expected a record")),
@@ -47,33 +47,33 @@ fn load_config(path: &Path, options: &mut Options) -> Result<(), String> {
         let RecordItem::Pair { key, value, .. } = item else {
             return Err(format!("{name}: spread is not allowed in a config record"));
         };
-        let ExprKind::String(k) = &key.kind else {
+        let Expr::String(k) = &key.expr else {
             return Err(format!("{name}: option names must be strings"));
         };
         let key = k.value.as_ref();
         let text = value.span.slice(&src);
         let bad = || format!("{name}: `{key}` cannot be `{text}`");
-        match (key, &value.kind) {
-            ("indent", ExprKind::Int(n)) => options.indent = usize_of(*n).ok_or_else(bad)?,
-            ("indent_char", ExprKind::String(s)) => {
+        match (key, &value.expr) {
+            ("indent", Expr::Int(n)) => options.indent = usize_of(*n).ok_or_else(bad)?,
+            ("indent_char", Expr::String(s)) => {
                 options.indent_char = match s.value.as_ref() {
                     "space" => IndentChar::Space,
                     "tab" => IndentChar::Tab,
                     _ => return Err(bad()),
                 }
             }
-            ("line_length", ExprKind::Int(n)) => options.line_length = usize_of(*n).ok_or_else(bad)?,
-            ("margin", ExprKind::Int(n)) => options.margin = Some(usize_of(*n).ok_or_else(bad)?),
-            ("margin", ExprKind::Nothing) => options.margin = None,
-            ("comment_spacing", ExprKind::Int(n)) => options.comment_spacing = usize_of(*n).ok_or_else(bad)?,
-            ("keep_alignment", ExprKind::Bool(b)) => options.keep_alignment = *b,
-            ("trim_trailing_whitespace", ExprKind::Bool(b)) => options.trim_trailing_whitespace = *b,
-            ("indent_pipelines", ExprKind::Bool(b)) => options.indent_pipelines = *b,
-            ("strip_redundant_parens", ExprKind::Bool(b)) => options.strip_redundant_parens = *b,
-            ("expand_def_bodies", ExprKind::Bool(b)) => options.expand_def_bodies = *b,
-            ("expand_complex_records", ExprKind::Bool(b)) => options.expand_complex_records = *b,
-            ("compact_simple_closures", ExprKind::Bool(b)) => options.compact_simple_closures = *b,
-            ("unquote_match_patterns", ExprKind::Bool(b)) => options.unquote_match_patterns = *b,
+            ("line_length", Expr::Int(n)) => options.line_length = usize_of(*n).ok_or_else(bad)?,
+            ("margin", Expr::Int(n)) => options.margin = Some(usize_of(*n).ok_or_else(bad)?),
+            ("margin", Expr::Nothing) => options.margin = None,
+            ("comment_spacing", Expr::Int(n)) => options.comment_spacing = usize_of(*n).ok_or_else(bad)?,
+            ("keep_alignment", Expr::Bool(b)) => options.keep_alignment = *b,
+            ("trim_trailing_whitespace", Expr::Bool(b)) => options.trim_trailing_whitespace = *b,
+            ("indent_pipelines", Expr::Bool(b)) => options.indent_pipelines = *b,
+            ("strip_redundant_parens", Expr::Bool(b)) => options.strip_redundant_parens = *b,
+            ("expand_def_bodies", Expr::Bool(b)) => options.expand_def_bodies = *b,
+            ("expand_complex_records", Expr::Bool(b)) => options.expand_complex_records = *b,
+            ("compact_simple_closures", Expr::Bool(b)) => options.compact_simple_closures = *b,
+            ("unquote_match_patterns", Expr::Bool(b)) => options.unquote_match_patterns = *b,
             ("exclude", _) => {}
             (
                 "indent"

@@ -92,28 +92,29 @@ pub enum FlatShape {
 
 /// Flatten an AST into source-ordered `(span, shape)` pairs.
 pub fn flatten(ast: &Ast<'_>) -> Vec<(Span, FlatShape)> {
-    let mut f = Flattener { src: ast.source, out: Vec::new() };
-    f.visit_block(&ast.block);
+    let mut flattener = Flattener { src: ast.source, out: Vec::new() };
+    flattener.visit_block(&ast.block);
     // Comments and ignored text win over the shapes of the constructs they
     // sit in (the gaps of a list or record), so cut them out of every other shape.
-    let mut cuts: Vec<(Span, FlatShape)> = ast.comments.iter().map(|c| (c.span, FlatShape::Comment)).collect();
-    cuts.extend(ast.ignored.iter().map(|s| (*s, FlatShape::Ignored)));
-    cuts.sort_by_key(|(s, _)| (s.start, s.end));
-    let mut out = Vec::with_capacity(f.out.len() + cuts.len());
-    for (span, shape) in f.out {
+    let mut cuts: Vec<(Span, FlatShape)> =
+        ast.comments.iter().map(|comment| (comment.span, FlatShape::Comment)).collect();
+    cuts.extend(ast.ignored.iter().map(|ignored| (*ignored, FlatShape::Ignored)));
+    cuts.sort_by_key(|(cut, _)| (cut.start, cut.end));
+    let mut out = Vec::with_capacity(flattener.out.len() + cuts.len());
+    for (span, shape) in flattener.out {
         let mut start = span.start;
-        for (c, _) in cuts.iter().filter(|(c, _)| c.start < span.end && span.start < c.end) {
-            if c.start > start {
-                out.push((Span::new(start, c.start), shape));
+        for (cut, _) in cuts.iter().filter(|(cut, _)| cut.start < span.end && span.start < cut.end) {
+            if cut.start > start {
+                out.push((Span::new(start, cut.start), shape));
             }
-            start = start.max(c.end);
+            start = start.max(cut.end);
         }
         if start < span.end {
             out.push((Span::new(start, span.end), shape));
         }
     }
     out.extend(cuts);
-    out.sort_by_key(|(s, _)| (s.start, s.end));
+    out.sort_by_key(|(span, _)| (span.start, span.end));
     out.dedup();
     out
 }
@@ -142,40 +143,40 @@ impl Flattener<'_> {
     /// (the delimiters and punctuation of a collection).
     fn gaps(&mut self, outer: Span, inner: impl Iterator<Item = Span>, shape: FlatShape) {
         let mut cursor = outer.start;
-        for s in inner {
-            if s.start > cursor {
-                self.push(Span::new(cursor, s.start), shape);
+        for covered in inner {
+            if covered.start > cursor {
+                self.push(Span::new(cursor, covered.start), shape);
             }
-            cursor = cursor.max(s.end);
+            cursor = cursor.max(covered.end);
         }
         if outer.end > cursor {
             self.push(Span::new(cursor, outer.end), shape);
         }
     }
 
-    fn args(&mut self, args: &[Arg<'_>]) {
+    fn args(&mut self, args: &[Argument<'_>]) {
         for arg in args {
             match arg {
-                Arg::Positional(e) => self.visit_expr(e),
-                Arg::Flag(f) => match &f.value {
+                Argument::Positional(expr) => self.visit_expression(expr),
+                Argument::Named(flag) => match &flag.value {
                     Some(v) => {
-                        self.push(Span::new(f.span.start, v.span.start), FlatShape::Flag);
-                        self.visit_expr(v);
+                        self.push(Span::new(flag.span.start, v.span.start), FlatShape::Flag);
+                        self.visit_expression(v);
                     }
-                    None => self.push(f.span, FlatShape::Flag),
+                    None => self.push(flag.span, FlatShape::Flag),
                 },
-                Arg::Spread { dots, expr } => {
+                Argument::Spread { dots, expr } => {
                     self.push(*dots, FlatShape::Operator);
-                    self.visit_expr(expr);
+                    self.visit_expression(expr);
                 }
-                Arg::EndOfOptions(s) => self.push(*s, FlatShape::Flag),
+                Argument::EndOfOptions(span) => self.push(*span, FlatShape::Flag),
             }
         }
     }
 
     fn members(&mut self, members: &[PathMember<'_>]) {
-        for m in members {
-            self.push(m.span, FlatShape::CellPath);
+        for member in members {
+            self.push(member.span, FlatShape::CellPath);
         }
     }
 
@@ -187,49 +188,49 @@ impl Flattener<'_> {
 }
 
 impl<'a> Visitor<'a> for Flattener<'_> {
-    fn visit_element(&mut self, element: &PipelineElement<'a>) {
+    fn visit_pipeline_element(&mut self, element: &PipelineElement<'a>) {
         // After `e>|` the "pipe" is the redirection operator, already emitted.
-        if let Some(p) = element.pipe
-            && &self.src[p.range()] == "|"
+        if let Some(pipe) = element.pipe
+            && &self.src[pipe.range()] == "|"
         {
-            self.push(p, FlatShape::Pipe);
+            self.push(pipe, FlatShape::Pipe);
         }
-        walk_element(self, element);
+        walk_pipeline_element(self, element);
     }
 
-    fn visit_redirection(&mut self, redirection: &Redirection<'a>) {
-        let mut target = |t: &RedirectTarget<'a>| {
+    fn visit_redirection(&mut self, redirection: &PipelineRedirection<'a>) {
+        let mut target = |t: &RedirectionTarget<'a>| {
             self.push(t.op_span(), FlatShape::Redirection);
-            if let RedirectTarget::File { path, .. } = t {
-                self.visit_expr(path);
+            if let RedirectionTarget::File { path, .. } = t {
+                self.visit_expression(path);
             }
         };
         match redirection {
-            Redirection::Single { target: t, .. } => target(t),
-            Redirection::Separate { out, err } => {
+            PipelineRedirection::Single { target: t, .. } => target(t),
+            PipelineRedirection::Separate { out, err } => {
                 target(out);
                 target(err);
             }
         }
     }
 
-    fn visit_signature(&mut self, sig: &Signature<'a>) {
-        for p in &sig.params {
-            match &p.kind {
-                ParamKind::Flag { .. } => self.push(p.name.span, FlatShape::Flag),
-                _ => self.push(p.name.span, FlatShape::VarDecl),
+    fn visit_signature(&mut self, signature: &Signature<'a>) {
+        for parameter in &signature.params {
+            match &parameter.kind {
+                ParameterKind::Flag { .. } => self.push(parameter.name.span, FlatShape::Flag),
+                _ => self.push(parameter.name.span, FlatShape::VarDecl),
             }
-            if let Some(ty) = &p.ty {
+            if let Some(ty) = &parameter.ty {
                 self.push(ty.span, FlatShape::Type);
             }
-            if let Some(c) = p.completer {
-                self.push(c.span, FlatShape::InternalCall);
+            if let Some(completer) = parameter.completer {
+                self.push(completer.span, FlatShape::InternalCall);
             }
-            if let Some(d) = &p.default {
-                self.visit_expr(d);
+            if let Some(default) = &parameter.default {
+                self.visit_expression(default);
             }
         }
-        for io in &sig.io_types {
+        for io in &signature.input_output_types {
             self.push(io.input.span, FlatShape::Type);
             self.push(io.arrow, FlatShape::Operator);
             self.push(io.output.span, FlatShape::Type);
@@ -237,114 +238,114 @@ impl<'a> Visitor<'a> for Flattener<'_> {
         let covered: Vec<Span> = self
             .out
             .iter()
-            .filter(|(s, _)| sig.span.start <= s.start && s.end <= sig.span.end)
-            .map(|(s, _)| *s)
+            .filter(|(span, _)| signature.span.start <= span.start && span.end <= signature.span.end)
+            .map(|(span, _)| *span)
             .collect();
         let mut covered = covered;
-        covered.sort_by_key(|s| s.start);
-        self.gaps(sig.span, covered.into_iter(), FlatShape::Signature);
+        covered.sort_by_key(|span| span.start);
+        self.gaps(signature.span, covered.into_iter(), FlatShape::Signature);
     }
 
-    fn visit_pattern(&mut self, pattern: &Pattern<'a>) {
-        match &pattern.kind {
-            PatternKind::Value(e) => self.visit_expr(e),
+    fn visit_match_pattern(&mut self, pattern: &MatchPattern<'a>) {
+        match &pattern.pattern {
+            Pattern::Expression(expr) => self.visit_expression(expr),
             _ => self.push(pattern.span, FlatShape::MatchPattern),
         }
     }
 
-    fn visit_expr(&mut self, e: &Expr<'a>) {
-        let span = e.span;
+    fn visit_expression(&mut self, expression: &Expression<'a>) {
+        let span = expression.span;
         // Keyword statements (`let`, `if`, ...) start with their keyword.
-        let kw = e.keyword_span().unwrap_or(Span::point(span.start));
-        if !kw.is_empty() {
-            self.push(kw, FlatShape::Keyword);
+        let keyword = expression.keyword_span().unwrap_or(Span::point(span.start));
+        if !keyword.is_empty() {
+            self.push(keyword, FlatShape::Keyword);
         }
-        match &e.kind {
-            ExprKind::Bool(_) => self.push(span, FlatShape::Bool),
-            ExprKind::Nothing => self.push(span, FlatShape::Nothing),
-            ExprKind::Int(_) => self.push(span, FlatShape::Int),
-            ExprKind::Float(_) => self.push(span, FlatShape::Float),
-            ExprKind::String(_) => self.push(span, FlatShape::String),
-            ExprKind::Interpolation(i) => {
+        match &expression.expr {
+            Expr::Bool(_) => self.push(span, FlatShape::Bool),
+            Expr::Nothing => self.push(span, FlatShape::Nothing),
+            Expr::Int(_) => self.push(span, FlatShape::Int),
+            Expr::Float(_) => self.push(span, FlatShape::Float),
+            Expr::String(_) => self.push(span, FlatShape::String),
+            Expr::StringInterpolation(interpolation) => {
                 let mut inner = Vec::new();
-                for part in &i.parts {
+                for part in &interpolation.parts {
                     match part {
-                        InterpPart::Text { span, .. } => {
+                        InterpolationPart::Text { span, .. } => {
                             self.push(*span, FlatShape::StringInterpolation);
                             inner.push(*span);
                         }
-                        InterpPart::Expr(e) => {
-                            self.visit_expr(e);
-                            inner.push(e.span);
+                        InterpolationPart::Expression(expr) => {
+                            self.visit_expression(expr);
+                            inner.push(expr.span);
                         }
                     }
                 }
                 self.gaps(span, inner.into_iter(), FlatShape::StringInterpolation);
             }
-            ExprKind::Binary(_) => self.push(span, FlatShape::Binary),
-            ExprKind::Duration(_) => self.push(span, FlatShape::Duration),
-            ExprKind::Filesize(_) => self.push(span, FlatShape::Filesize),
-            ExprKind::DateTime(_) => self.push(span, FlatShape::DateTime),
-            ExprKind::Range(r) => {
-                if let Some(f) = &r.from {
-                    self.visit_expr(f);
+            Expr::Binary(_) => self.push(span, FlatShape::Binary),
+            Expr::Duration(_) => self.push(span, FlatShape::Duration),
+            Expr::Filesize(_) => self.push(span, FlatShape::Filesize),
+            Expr::DateTime(_) => self.push(span, FlatShape::DateTime),
+            Expr::Range(range) => {
+                if let Some(from) = &range.from {
+                    self.visit_expression(from);
                 }
-                if let Some(s) = r.next_op_span {
-                    self.push(s, FlatShape::Range);
+                if let Some(next_op_span) = range.operator.next_op_span {
+                    self.push(next_op_span, FlatShape::Range);
                 }
-                if let Some(n) = &r.next {
-                    self.visit_expr(n);
+                if let Some(next) = &range.next {
+                    self.visit_expression(next);
                 }
-                self.push(r.op_span, FlatShape::Range);
-                if let Some(t) = &r.to {
-                    self.visit_expr(t);
+                self.push(range.operator.span, FlatShape::Range);
+                if let Some(to) = &range.to {
+                    self.visit_expression(to);
                 }
             }
-            ExprKind::Var(_) => self.push(span, FlatShape::Variable),
-            ExprKind::CellPath(c) => {
+            Expr::Var(_) => self.push(span, FlatShape::Variable),
+            Expr::CellPath(cell_path) => {
                 self.push(Span::new(span.start, span.start + 2), FlatShape::CellPath);
-                self.members(&c.members);
+                self.members(&cell_path.members);
             }
-            ExprKind::FullCellPath(p) => {
-                self.visit_expr(&p.head);
-                self.members(&p.members);
+            Expr::FullCellPath(full_cell_path) => {
+                self.visit_expression(&full_cell_path.head);
+                self.members(&full_cell_path.tail);
             }
-            ExprKind::List(items) => {
+            Expr::List(items) => {
                 let spans: Vec<Span> = items.iter().map(ListItem::span).collect();
                 for item in items {
                     match item {
-                        ListItem::Item(e) => self.visit_expr(e),
+                        ListItem::Item(expr) => self.visit_expression(expr),
                         ListItem::Spread { dots, expr } => {
                             self.push(*dots, FlatShape::Operator);
-                            self.visit_expr(expr);
+                            self.visit_expression(expr);
                         }
                     }
                 }
                 self.gaps(span, spans.into_iter(), FlatShape::List);
             }
-            ExprKind::Table(t) => {
-                self.visit_expr(&t.columns);
-                for row in &t.rows {
-                    self.visit_expr(row);
+            Expr::Table(table) => {
+                self.visit_expression(&table.columns);
+                for row in &table.rows {
+                    self.visit_expression(row);
                 }
-                let spans = std::iter::once(t.columns.span).chain(t.rows.iter().map(|r| r.span));
+                let spans = std::iter::once(table.columns.span).chain(table.rows.iter().map(|r| r.span));
                 self.gaps(span, spans, FlatShape::Table);
             }
-            ExprKind::Record(items) => {
+            Expr::Record(items) => {
                 let mut spans = Vec::new();
                 for item in items {
                     match item {
                         RecordItem::Pair { key, colon, value } => {
-                            self.visit_expr(key);
+                            self.visit_expression(key);
                             self.push(*colon, FlatShape::Record);
-                            self.visit_expr(value);
+                            self.visit_expression(value);
                             spans.push(key.span);
                             spans.push(*colon);
                             spans.push(value.span);
                         }
                         RecordItem::Spread { dots, expr } => {
                             self.push(*dots, FlatShape::Operator);
-                            self.visit_expr(expr);
+                            self.visit_expression(expr);
                             spans.push(*dots);
                             spans.push(expr.span);
                         }
@@ -352,217 +353,228 @@ impl<'a> Visitor<'a> for Flattener<'_> {
                 }
                 self.gaps(span, spans.into_iter(), FlatShape::Record);
             }
-            ExprKind::Closure(c) => {
-                let body_start = c.params.as_ref().map_or(c.body.span.start, |p| p.span.start);
+            Expr::Closure(closure) => {
+                let body_start = closure.params.as_ref().map_or(closure.body.span.start, |params| params.span.start);
                 self.push(Span::new(span.start, body_start), FlatShape::Closure);
-                if let Some(sig) = &c.params {
+                if let Some(sig) = &closure.params {
                     self.visit_signature(sig);
                 }
-                self.visit_block(&c.body);
-                self.push(Span::new(c.body.span.end, span.end), FlatShape::Closure);
+                self.visit_block(&closure.body);
+                self.push(Span::new(closure.body.span.end, span.end), FlatShape::Closure);
             }
-            ExprKind::Block(b) => self.block_braces(span, b, FlatShape::Block),
-            ExprKind::Subexpression(b) => self.block_braces(span, b, FlatShape::Block),
-            ExprKind::BinaryOp(b) => {
-                self.visit_expr(&b.lhs);
-                let shape =
-                    if matches!(b.op.item, Operator::Boolean(_)) { FlatShape::Boolean } else { FlatShape::Operator };
-                self.push(b.op.span, shape);
-                self.visit_expr(&b.rhs);
+            Expr::Block(block) => self.block_braces(span, block, FlatShape::Block),
+            Expr::Subexpression(block) => self.block_braces(span, block, FlatShape::Block),
+            Expr::BinaryOp(binary) => {
+                self.visit_expression(&binary.lhs);
+                let shape = if matches!(binary.op.item, Operator::Boolean(_)) {
+                    FlatShape::Boolean
+                } else {
+                    FlatShape::Operator
+                };
+                self.push(binary.op.span, shape);
+                self.visit_expression(&binary.rhs);
             }
-            ExprKind::UnaryNot(n) => {
-                self.push(n.not_span, FlatShape::Boolean);
-                self.visit_expr(&n.expr);
+            Expr::UnaryNot(not) => {
+                self.push(not.not_span, FlatShape::Boolean);
+                self.visit_expression(&not.expr);
             }
-            ExprKind::Assignment(a) => {
-                self.visit_expr(&a.lhs);
-                self.push(a.op.span, FlatShape::Operator);
-                self.visit_block(&a.rhs);
+            Expr::Assignment(assignment) => {
+                self.visit_expression(&assignment.lhs);
+                self.push(assignment.op.span, FlatShape::Operator);
+                self.visit_block(&assignment.rhs);
             }
-            ExprKind::Call(c) => {
-                match c.sigil {
-                    Some(sigil) if sigil.end == c.head.span.start => {
-                        self.push(sigil.merge(c.head.span), FlatShape::InternalCall);
+            Expr::Call(call) => {
+                match call.sigil {
+                    Some(sigil) if sigil.end == call.head.span.start => {
+                        self.push(sigil.merge(call.head.span), FlatShape::InternalCall);
                     }
                     Some(sigil) => {
                         self.push(sigil, FlatShape::InternalCall);
-                        self.push(c.head.span, FlatShape::InternalCall);
+                        self.push(call.head.span, FlatShape::InternalCall);
                     }
-                    None => self.push(c.head.span, FlatShape::InternalCall),
+                    None => self.push(call.head.span, FlatShape::InternalCall),
                 }
-                self.args(&c.args);
+                self.args(&call.arguments);
             }
-            ExprKind::DynamicCall(d) => {
-                self.push(d.sigil, FlatShape::InternalCall);
-                self.visit_expr(&d.head);
-                self.args(&d.args);
+            Expr::DynamicCall(dynamic_call) => {
+                self.push(dynamic_call.sigil, FlatShape::InternalCall);
+                self.visit_expression(&dynamic_call.head);
+                self.args(&dynamic_call.arguments);
             }
-            ExprKind::ExternalCall(c) => {
-                self.push(c.caret, FlatShape::External);
-                match &c.head.kind {
-                    ExprKind::String(_) => self.push(c.head.span, FlatShape::External),
-                    _ => self.visit_expr(&c.head),
+            Expr::ExternalCall(external_call) => {
+                self.push(external_call.caret, FlatShape::External);
+                match &external_call.head.expr {
+                    Expr::String(_) => self.push(external_call.head.span, FlatShape::External),
+                    _ => self.visit_expression(&external_call.head),
                 }
-                for arg in &c.args {
+                for arg in &external_call.arguments {
                     match arg {
-                        ExternalArg::Regular(e) => match &e.kind {
-                            ExprKind::String(_) => self.push(e.span, FlatShape::ExternalArg),
-                            _ => self.visit_expr(e),
+                        ExternalArgument::Regular(expr) => match &expr.expr {
+                            Expr::String(_) => self.push(expr.span, FlatShape::ExternalArg),
+                            _ => self.visit_expression(expr),
                         },
-                        ExternalArg::Spread { dots, expr } => {
+                        ExternalArgument::Spread { dots, expr } => {
                             self.push(*dots, FlatShape::Operator);
-                            self.visit_expr(expr);
+                            self.visit_expression(expr);
                         }
                     }
                 }
             }
-            ExprKind::EnvShorthand(e) => {
-                for v in &e.vars {
-                    self.push(Span::new(v.span.start, v.value.span.start), FlatShape::VarDecl);
-                    self.visit_expr(&v.value);
+            Expr::EnvShorthand(env_shorthand) => {
+                for assignment in &env_shorthand.vars {
+                    self.push(Span::new(assignment.span.start, assignment.value.span.start), FlatShape::VarDecl);
+                    self.visit_expression(&assignment.value);
                 }
-                self.visit_expr(&e.expr);
+                self.visit_expression(&env_shorthand.expr);
             }
-            ExprKind::AttributeBlock(a) => {
-                for attr in &a.attributes {
+            Expr::AttributeBlock(attribute_block) => {
+                for attr in &attribute_block.attributes {
                     self.push(Span::new(attr.span.start, attr.name.span.end), FlatShape::Attribute);
-                    self.args(&attr.args);
+                    self.args(&attr.arguments);
                 }
-                self.visit_expr(&a.item);
+                self.visit_expression(&attribute_block.item);
             }
-            ExprKind::Let(b) | ExprKind::Mut(b) | ExprKind::Const(b) => {
-                self.var_decl(b.name.span);
-                if let Some(ty) = &b.ty {
+            Expr::Let(binding) | Expr::Mut(binding) | Expr::Const(binding) => {
+                self.var_decl(binding.name.span);
+                if let Some(ty) = &binding.ty {
                     self.push(ty.span, FlatShape::Type);
                 }
-                if let Some(eq) = b.eq {
+                if let Some(eq) = binding.eq {
                     self.push(eq, FlatShape::Operator);
                 }
-                if let Some(value) = &b.value {
+                if let Some(value) = &binding.value {
                     self.visit_block(value);
                 }
             }
-            ExprKind::Def(d) => {
-                for f in &d.flags {
-                    self.push(f.span, FlatShape::Flag);
+            Expr::Def(def) => {
+                for flag in &def.flags {
+                    self.push(flag.span, FlatShape::Flag);
                 }
-                self.push(d.name.span, FlatShape::Definition);
-                self.visit_signature(&d.signature);
-                match &d.body_params {
+                self.push(def.name.span, FlatShape::Definition);
+                self.visit_signature(&def.signature);
+                match &def.body_params {
                     // `def f [] {|x| }`: like a closure, the braces around the parameters.
-                    Some(p) => {
-                        self.push(Span::new(d.signature.span.end, p.span.start), FlatShape::Block);
-                        self.visit_signature(p);
-                        self.visit_block(&d.body);
-                        self.push(Span::new(d.body.span.end, span.end), FlatShape::Block);
+                    Some(body_params) => {
+                        self.push(Span::new(def.signature.span.end, body_params.span.start), FlatShape::Block);
+                        self.visit_signature(body_params);
+                        self.visit_block(&def.body);
+                        self.push(Span::new(def.body.span.end, span.end), FlatShape::Block);
                     }
-                    None => self.block_braces(Span::new(d.signature.span.end, span.end), &d.body, FlatShape::Block),
+                    None => self.block_braces(Span::new(def.signature.span.end, span.end), &def.body, FlatShape::Block),
                 }
             }
-            ExprKind::Extern(x) => {
-                self.push(x.name.span, FlatShape::Definition);
-                self.visit_signature(&x.signature);
+            Expr::Extern(extern_declaration) => {
+                self.push(extern_declaration.name.span, FlatShape::Definition);
+                self.visit_signature(&extern_declaration.signature);
             }
-            ExprKind::Alias(a) => {
-                self.push(a.name.span, FlatShape::Definition);
-                self.push(a.eq, FlatShape::Operator);
-                if let Some(value) = &a.value {
-                    self.visit_expr(value);
+            Expr::Alias(alias) => {
+                self.push(alias.name.span, FlatShape::Definition);
+                self.push(alias.eq, FlatShape::Operator);
+                if let Some(value) = &alias.value {
+                    self.visit_expression(value);
                 }
             }
-            ExprKind::Use(u) => {
-                self.visit_expr(&u.module);
-                for m in &u.members {
-                    match &m.kind {
-                        UseMemberKind::List(names) => {
-                            for n in names {
-                                self.push(n.span, FlatShape::String);
+            Expr::Use(use_statement) => {
+                self.visit_expression(&use_statement.module);
+                for member in &use_statement.members {
+                    match &member.kind {
+                        ImportPatternMemberKind::List(names) => {
+                            for name in names {
+                                self.push(name.span, FlatShape::String);
                             }
-                            self.gaps(m.span, names.iter().map(|n| n.span), FlatShape::List);
+                            self.gaps(member.span, names.iter().map(|n| n.span), FlatShape::List);
                         }
-                        UseMemberKind::Ignored(e) => {
-                            self.visit_expr(e);
-                            self.gaps(m.span, std::iter::once(e.span), FlatShape::Ignored);
+                        ImportPatternMemberKind::Ignored(ignored) => {
+                            self.visit_expression(ignored);
+                            self.gaps(member.span, std::iter::once(ignored.span), FlatShape::Ignored);
                         }
-                        _ => self.push(m.span, FlatShape::String),
+                        _ => self.push(member.span, FlatShape::String),
                     }
                 }
             }
-            ExprKind::Module(m) => {
-                self.visit_expr(&m.name);
-                if let Some(b) = &m.body {
-                    self.block_braces(Span::new(m.name.span.end, span.end), b, FlatShape::Block);
+            Expr::Module(module) => {
+                self.visit_expression(&module.name);
+                if let Some(body) = &module.body {
+                    self.block_braces(Span::new(module.name.span.end, span.end), body, FlatShape::Block);
                 }
             }
-            ExprKind::Export(x) => {
-                self.visit_expr(&x.item);
+            Expr::Export(export) => {
+                self.visit_expression(&export.item);
             }
-            ExprKind::ExportEnv(x) => {
-                self.block_braces(Span::new(kw.end, span.end), &x.body, FlatShape::Block);
+            Expr::ExportEnv(export_env) => {
+                self.block_braces(Span::new(keyword.end, span.end), &export_env.body, FlatShape::Block);
             }
-            ExprKind::If(i) => {
-                self.visit_expr(&i.condition);
-                let then_end = i.else_branch.as_ref().map_or(span.end, |e| e.keyword.start);
-                self.block_braces(Span::new(i.condition.span.end, then_end), &i.then_block, FlatShape::Block);
-                if let Some(e) = &i.else_branch {
-                    self.push(e.keyword, FlatShape::Keyword);
-                    self.visit_expr(&e.body);
+            Expr::If(if_expression) => {
+                self.visit_expression(&if_expression.condition);
+                let then_end = if_expression.else_branch.as_ref().map_or(span.end, |e| e.keyword.start);
+                self.block_braces(
+                    Span::new(if_expression.condition.span.end, then_end),
+                    &if_expression.then_block,
+                    FlatShape::Block,
+                );
+                if let Some(else_branch) = &if_expression.else_branch {
+                    self.push(else_branch.keyword, FlatShape::Keyword);
+                    self.visit_expression(&else_branch.body);
                 }
             }
-            ExprKind::Match(m) => {
-                self.visit_expr(&m.value);
+            Expr::Match(match_expression) => {
+                self.visit_expression(&match_expression.value);
                 let mut inner = Vec::new();
-                for arm in &m.arms {
-                    self.visit_pattern(&arm.pattern);
+                for arm in &match_expression.arms {
+                    self.visit_match_pattern(&arm.pattern);
                     inner.push(arm.pattern.span);
-                    if let Some(g) = &arm.guard {
-                        self.visit_expr(g);
-                        inner.push(g.span);
+                    if let Some(guard) = &arm.guard {
+                        self.visit_expression(guard);
+                        inner.push(guard.span);
                     }
                     self.push(arm.arrow, FlatShape::Operator);
                     inner.push(arm.arrow);
-                    self.visit_expr(&arm.body);
+                    self.visit_expression(&arm.body);
                     inner.push(arm.body.span);
                 }
-                match &m.value_block {
-                    Some(b) => self.visit_expr(b),
-                    None => self.gaps(m.block_span, inner.into_iter(), FlatShape::Block),
+                match &match_expression.value_block {
+                    Some(b) => self.visit_expression(b),
+                    None => self.gaps(match_expression.block_span, inner.into_iter(), FlatShape::Block),
                 }
             }
-            ExprKind::For(f) => {
-                self.var_decl(f.var.span);
-                if let Some(ty) = &f.ty {
+            Expr::For(for_loop) => {
+                self.var_decl(for_loop.var.span);
+                if let Some(ty) = &for_loop.ty {
                     self.push(ty.span, FlatShape::Type);
                 }
-                self.push(f.in_keyword, FlatShape::Keyword);
-                self.visit_expr(&f.iterable);
-                self.block_braces(Span::new(f.iterable.span.end, span.end), &f.body, FlatShape::Block);
+                self.push(for_loop.in_keyword, FlatShape::Keyword);
+                self.visit_expression(&for_loop.iterable);
+                self.block_braces(Span::new(for_loop.iterable.span.end, span.end), &for_loop.body, FlatShape::Block);
             }
-            ExprKind::While(w) => {
-                self.visit_expr(&w.condition);
-                self.block_braces(Span::new(w.condition.span.end, span.end), &w.body, FlatShape::Block);
+            Expr::While(while_loop) => {
+                self.visit_expression(&while_loop.condition);
+                self.block_braces(
+                    Span::new(while_loop.condition.span.end, span.end),
+                    &while_loop.body,
+                    FlatShape::Block,
+                );
             }
-            ExprKind::Loop(l) => {
-                self.block_braces(Span::new(kw.end, span.end), &l.body, FlatShape::Block);
+            Expr::Loop(loop_expression) => {
+                self.block_braces(Span::new(keyword.end, span.end), &loop_expression.body, FlatShape::Block);
             }
-            ExprKind::Break | ExprKind::Continue => {}
-            ExprKind::Return(r) => {
-                if let Some(v) = &r.value {
-                    self.visit_expr(v);
+            Expr::Break | Expr::Continue => {}
+            Expr::Return(return_expression) => {
+                if let Some(value) = &return_expression.value {
+                    self.visit_expression(value);
                 }
             }
-            ExprKind::Try(t) => {
-                let body_end = t.handlers.first().map_or(span.end, |h| h.keyword.start);
-                self.block_braces(Span::new(kw.end, body_end), &t.body, FlatShape::Block);
-                for h in &t.handlers {
-                    self.push(h.keyword, FlatShape::Keyword);
-                    self.visit_expr(&h.body);
+            Expr::Try(try_expression) => {
+                let body_end = try_expression.handlers.first().map_or(span.end, |h| h.keyword.start);
+                self.block_braces(Span::new(keyword.end, body_end), &try_expression.body, FlatShape::Block);
+                for handler in &try_expression.handlers {
+                    self.push(handler.keyword, FlatShape::Keyword);
+                    self.visit_expression(&handler.body);
                 }
             }
-            ExprKind::Where(w) => {
-                self.visit_expr(&w.condition);
+            Expr::Where(where_expression) => {
+                self.visit_expression(&where_expression.condition);
             }
-            ExprKind::Garbage => self.push(span, FlatShape::Garbage),
+            Expr::Garbage => self.push(span, FlatShape::Garbage),
         }
     }
 }

@@ -95,31 +95,31 @@ impl<'a> Visitor<'a> for SpanChecker<'_> {
     fn visit_pipeline(&mut self, p: &Pipeline<'a>) {
         self.nested(p.span, "pipeline", |s| walk_pipeline(s, p));
     }
-    fn visit_element(&mut self, e: &PipelineElement<'a>) {
-        self.nested(e.span, "element", |s| walk_element(s, e));
+    fn visit_pipeline_element(&mut self, e: &PipelineElement<'a>) {
+        self.nested(e.span, "element", |s| walk_pipeline_element(s, e));
     }
-    fn visit_expr(&mut self, e: &Expr<'a>) {
+    fn visit_expression(&mut self, e: &Expression<'a>) {
         if e.is_garbage() {
             self.garbage += 1;
         }
-        self.nested(e.span, "expr", |s| walk_expr(s, e));
+        self.nested(e.span, "expr", |s| walk_expression(s, e));
     }
     fn visit_signature(&mut self, sig: &Signature<'a>) {
         self.nested(sig.span, "signature", |s| walk_signature(s, sig));
     }
-    fn visit_param(&mut self, p: &Param<'a>) {
-        self.nested(p.span, "param", |s| walk_param(s, p));
+    fn visit_parameter(&mut self, p: &Parameter<'a>) {
+        self.nested(p.span, "param", |s| walk_parameter(s, p));
     }
-    fn visit_type(&mut self, ty: &TypeAnnotation<'a>) {
-        self.nested(ty.span, "type", |s| walk_type(s, ty));
+    fn visit_type_annotation(&mut self, ty: &TypeAnnotation<'a>) {
+        self.nested(ty.span, "type", |s| walk_type_annotation(s, ty));
     }
-    fn visit_pattern(&mut self, p: &Pattern<'a>) {
-        self.nested(p.span, "pattern", |s| walk_pattern(s, p));
+    fn visit_match_pattern(&mut self, p: &MatchPattern<'a>) {
+        self.nested(p.span, "pattern", |s| walk_match_pattern(s, p));
     }
     fn visit_path_member(&mut self, m: &PathMember<'a>) {
         self.check(m.span, "member");
     }
-    fn visit_redirection(&mut self, r: &Redirection<'a>) {
+    fn visit_redirection(&mut self, r: &PipelineRedirection<'a>) {
         self.check(r.span(), "redirection");
         walk_redirection(self, r);
     }

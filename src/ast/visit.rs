@@ -19,327 +19,329 @@ pub trait Visitor<'a> {
         walk_pipeline(self, pipeline);
     }
     /// Visit a pipeline element.
-    fn visit_element(&mut self, element: &PipelineElement<'a>) {
-        walk_element(self, element);
+    fn visit_pipeline_element(&mut self, element: &PipelineElement<'a>) {
+        walk_pipeline_element(self, element);
     }
     /// Visit an expression.
-    fn visit_expr(&mut self, expr: &Expr<'a>) {
-        walk_expr(self, expr);
+    fn visit_expression(&mut self, expr: &Expression<'a>) {
+        walk_expression(self, expr);
     }
     /// Visit a signature.
     fn visit_signature(&mut self, sig: &Signature<'a>) {
         walk_signature(self, sig);
     }
     /// Visit a parameter.
-    fn visit_param(&mut self, param: &Param<'a>) {
-        walk_param(self, param);
+    fn visit_parameter(&mut self, param: &Parameter<'a>) {
+        walk_parameter(self, param);
     }
     /// Visit a type annotation.
-    fn visit_type(&mut self, ty: &TypeAnnotation<'a>) {
-        walk_type(self, ty);
+    fn visit_type_annotation(&mut self, ty: &TypeAnnotation<'a>) {
+        walk_type_annotation(self, ty);
     }
     /// Visit a match pattern.
-    fn visit_pattern(&mut self, pattern: &Pattern<'a>) {
-        walk_pattern(self, pattern);
+    fn visit_match_pattern(&mut self, pattern: &MatchPattern<'a>) {
+        walk_match_pattern(self, pattern);
     }
     /// Visit a cell-path member.
     fn visit_path_member(&mut self, member: &PathMember<'a>) {}
     /// Visit a comment attached to a pipeline or parameter.
     fn visit_comment(&mut self, comment: &Comment) {}
     /// Visit a redirection.
-    fn visit_redirection(&mut self, redirection: &Redirection<'a>) {
+    fn visit_redirection(&mut self, redirection: &PipelineRedirection<'a>) {
         walk_redirection(self, redirection);
     }
 }
 
 /// Visit the children of a block.
-pub fn walk_block<'a, V: Visitor<'a> + ?Sized>(v: &mut V, block: &Block<'a>) {
-    for p in &block.pipelines {
-        v.visit_pipeline(p);
+pub fn walk_block<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, block: &Block<'a>) {
+    for pipeline in &block.pipelines {
+        visitor.visit_pipeline(pipeline);
     }
 }
 
 /// Visit the children of a pipeline.
-pub fn walk_pipeline<'a, V: Visitor<'a> + ?Sized>(v: &mut V, pipeline: &Pipeline<'a>) {
-    for c in &pipeline.leading_comments {
-        v.visit_comment(c);
+pub fn walk_pipeline<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, pipeline: &Pipeline<'a>) {
+    for comment in &pipeline.leading_comments {
+        visitor.visit_comment(comment);
     }
-    for e in &pipeline.elements {
-        v.visit_element(e);
+    for element in &pipeline.elements {
+        visitor.visit_pipeline_element(element);
     }
-    for c in &pipeline.trailing_comments {
-        v.visit_comment(c);
+    for comment in &pipeline.trailing_comments {
+        visitor.visit_comment(comment);
     }
 }
 
 /// Visit the children of a pipeline element.
-pub fn walk_element<'a, V: Visitor<'a> + ?Sized>(v: &mut V, element: &PipelineElement<'a>) {
-    v.visit_expr(&element.expr);
-    if let Some(r) = &element.redirection {
-        v.visit_redirection(r);
+pub fn walk_pipeline_element<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, element: &PipelineElement<'a>) {
+    visitor.visit_expression(&element.expr);
+    if let Some(redirection) = &element.redirection {
+        visitor.visit_redirection(redirection);
     }
 }
 
 /// Visit the children of a redirection.
-pub fn walk_redirection<'a, V: Visitor<'a> + ?Sized>(v: &mut V, redirection: &Redirection<'a>) {
-    let mut target = |t: &RedirectTarget<'a>| {
-        if let RedirectTarget::File { path, .. } = t {
-            v.visit_expr(path);
+pub fn walk_redirection<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, redirection: &PipelineRedirection<'a>) {
+    let mut visit_target = |target: &RedirectionTarget<'a>| {
+        if let RedirectionTarget::File { path, .. } = target {
+            visitor.visit_expression(path);
         }
     };
     match redirection {
-        Redirection::Single { target: t, .. } => target(t),
-        Redirection::Separate { out, err } => {
-            target(out);
-            target(err);
+        PipelineRedirection::Single { target, .. } => visit_target(target),
+        PipelineRedirection::Separate { out, err } => {
+            visit_target(out);
+            visit_target(err);
         }
     }
 }
 
 /// Visit the children of an expression.
-pub fn walk_expr<'a, V: Visitor<'a> + ?Sized>(v: &mut V, expr: &Expr<'a>) {
-    match &expr.kind {
-        ExprKind::Bool(_)
-        | ExprKind::Nothing
-        | ExprKind::Int(_)
-        | ExprKind::Float(_)
-        | ExprKind::String(_)
-        | ExprKind::Binary(_)
-        | ExprKind::Duration(_)
-        | ExprKind::Filesize(_)
-        | ExprKind::DateTime(_)
-        | ExprKind::Var(_)
-        | ExprKind::Break
-        | ExprKind::Continue
-        | ExprKind::Garbage => {}
-        ExprKind::Interpolation(i) => {
-            for part in &i.parts {
-                if let InterpPart::Expr(e) = part {
-                    v.visit_expr(e);
+pub fn walk_expression<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, expr: &Expression<'a>) {
+    match &expr.expr {
+        Expr::Bool(_)
+        | Expr::Nothing
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::String(_)
+        | Expr::Binary(_)
+        | Expr::Duration(_)
+        | Expr::Filesize(_)
+        | Expr::DateTime(_)
+        | Expr::Var(_)
+        | Expr::Break
+        | Expr::Continue
+        | Expr::Garbage => {}
+        Expr::StringInterpolation(interpolation) => {
+            for part in &interpolation.parts {
+                if let InterpolationPart::Expression(expr) = part {
+                    visitor.visit_expression(expr);
                 }
             }
         }
-        ExprKind::Range(r) => {
-            if let Some(e) = &r.from {
-                v.visit_expr(e);
+        Expr::Range(range) => {
+            if let Some(from) = &range.from {
+                visitor.visit_expression(from);
             }
-            if let Some(e) = &r.next {
-                v.visit_expr(e);
+            if let Some(next) = &range.next {
+                visitor.visit_expression(next);
             }
-            if let Some(e) = &r.to {
-                v.visit_expr(e);
-            }
-        }
-        ExprKind::CellPath(p) => {
-            for m in &p.members {
-                v.visit_path_member(m);
+            if let Some(to) = &range.to {
+                visitor.visit_expression(to);
             }
         }
-        ExprKind::FullCellPath(p) => {
-            v.visit_expr(&p.head);
-            for m in &p.members {
-                v.visit_path_member(m);
+        Expr::CellPath(cell_path) => {
+            for member in &cell_path.members {
+                visitor.visit_path_member(member);
             }
         }
-        ExprKind::List(items) => {
+        Expr::FullCellPath(full_cell_path) => {
+            visitor.visit_expression(&full_cell_path.head);
+            for member in &full_cell_path.tail {
+                visitor.visit_path_member(member);
+            }
+        }
+        Expr::List(items) => {
             for item in items {
                 match item {
-                    ListItem::Item(e) | ListItem::Spread { expr: e, .. } => v.visit_expr(e),
+                    ListItem::Item(expr) | ListItem::Spread { expr, .. } => visitor.visit_expression(expr),
                 }
             }
         }
-        ExprKind::Table(t) => {
-            v.visit_expr(&t.columns);
-            for row in &t.rows {
-                v.visit_expr(row);
+        Expr::Table(table) => {
+            visitor.visit_expression(&table.columns);
+            for row in &table.rows {
+                visitor.visit_expression(row);
             }
         }
-        ExprKind::Record(items) => {
+        Expr::Record(items) => {
             for item in items {
                 match item {
                     RecordItem::Pair { key, value, .. } => {
-                        v.visit_expr(key);
-                        v.visit_expr(value);
+                        visitor.visit_expression(key);
+                        visitor.visit_expression(value);
                     }
-                    RecordItem::Spread { expr, .. } => v.visit_expr(expr),
+                    RecordItem::Spread { expr, .. } => visitor.visit_expression(expr),
                 }
             }
         }
-        ExprKind::Closure(c) => {
-            if let Some(sig) = &c.params {
-                v.visit_signature(sig);
+        Expr::Closure(closure) => {
+            if let Some(sig) = &closure.params {
+                visitor.visit_signature(sig);
             }
-            v.visit_block(&c.body);
+            visitor.visit_block(&closure.body);
         }
-        ExprKind::Block(b) | ExprKind::Subexpression(b) => v.visit_block(b),
-        ExprKind::BinaryOp(b) => {
-            v.visit_expr(&b.lhs);
-            v.visit_expr(&b.rhs);
+        Expr::Block(block) | Expr::Subexpression(block) => visitor.visit_block(block),
+        Expr::BinaryOp(binary) => {
+            visitor.visit_expression(&binary.lhs);
+            visitor.visit_expression(&binary.rhs);
         }
-        ExprKind::UnaryNot(n) => v.visit_expr(&n.expr),
-        ExprKind::Assignment(a) => {
-            v.visit_expr(&a.lhs);
-            v.visit_block(&a.rhs);
+        Expr::UnaryNot(not) => visitor.visit_expression(&not.expr),
+        Expr::Assignment(assignment) => {
+            visitor.visit_expression(&assignment.lhs);
+            visitor.visit_block(&assignment.rhs);
         }
-        ExprKind::Call(c) => walk_args(v, &c.args),
-        ExprKind::DynamicCall(d) => {
-            v.visit_expr(&d.head);
-            walk_args(v, &d.args);
+        Expr::Call(call) => walk_arguments(visitor, &call.arguments),
+        Expr::DynamicCall(dynamic_call) => {
+            visitor.visit_expression(&dynamic_call.head);
+            walk_arguments(visitor, &dynamic_call.arguments);
         }
-        ExprKind::ExternalCall(c) => {
-            v.visit_expr(&c.head);
-            for arg in &c.args {
+        Expr::ExternalCall(external_call) => {
+            visitor.visit_expression(&external_call.head);
+            for arg in &external_call.arguments {
                 match arg {
-                    ExternalArg::Regular(e) | ExternalArg::Spread { expr: e, .. } => v.visit_expr(e),
+                    ExternalArgument::Regular(expr) | ExternalArgument::Spread { expr, .. } => {
+                        visitor.visit_expression(expr)
+                    }
                 }
             }
         }
-        ExprKind::EnvShorthand(e) => {
-            for var in &e.vars {
-                v.visit_expr(&var.value);
+        Expr::EnvShorthand(env_shorthand) => {
+            for var in &env_shorthand.vars {
+                visitor.visit_expression(&var.value);
             }
-            v.visit_expr(&e.expr);
+            visitor.visit_expression(&env_shorthand.expr);
         }
-        ExprKind::AttributeBlock(a) => {
-            for attr in &a.attributes {
-                walk_args(v, &attr.args);
+        Expr::AttributeBlock(attribute_block) => {
+            for attr in &attribute_block.attributes {
+                walk_arguments(visitor, &attr.arguments);
             }
-            v.visit_expr(&a.item);
+            visitor.visit_expression(&attribute_block.item);
         }
-        ExprKind::Let(b) | ExprKind::Mut(b) | ExprKind::Const(b) => {
-            if let Some(ty) = &b.ty {
-                v.visit_type(ty);
+        Expr::Let(binding) | Expr::Mut(binding) | Expr::Const(binding) => {
+            if let Some(ty) = &binding.ty {
+                visitor.visit_type_annotation(ty);
             }
-            if let Some(value) = &b.value {
-                v.visit_block(value);
-            }
-        }
-        ExprKind::Def(d) => {
-            v.visit_signature(&d.signature);
-            if let Some(p) = &d.body_params {
-                v.visit_signature(p);
-            }
-            v.visit_block(&d.body);
-        }
-        ExprKind::Extern(e) => v.visit_signature(&e.signature),
-        ExprKind::Alias(a) => {
-            if let Some(v_) = &a.value {
-                v.visit_expr(v_);
+            if let Some(value) = &binding.value {
+                visitor.visit_block(value);
             }
         }
-        ExprKind::Use(u) => {
-            v.visit_expr(&u.module);
-            for m in &u.members {
-                if let UseMemberKind::Ignored(e) = &m.kind {
-                    v.visit_expr(e);
+        Expr::Def(def) => {
+            visitor.visit_signature(&def.signature);
+            if let Some(body_params) = &def.body_params {
+                visitor.visit_signature(body_params);
+            }
+            visitor.visit_block(&def.body);
+        }
+        Expr::Extern(extern_declaration) => visitor.visit_signature(&extern_declaration.signature),
+        Expr::Alias(alias) => {
+            if let Some(v_) = &alias.value {
+                visitor.visit_expression(v_);
+            }
+        }
+        Expr::Use(use_statement) => {
+            visitor.visit_expression(&use_statement.module);
+            for member in &use_statement.members {
+                if let ImportPatternMemberKind::Ignored(ignored) = &member.kind {
+                    visitor.visit_expression(ignored);
                 }
             }
         }
-        ExprKind::Module(m) => {
-            v.visit_expr(&m.name);
-            if let Some(b) = &m.body {
-                v.visit_block(b);
+        Expr::Module(module) => {
+            visitor.visit_expression(&module.name);
+            if let Some(body) = &module.body {
+                visitor.visit_block(body);
             }
         }
-        ExprKind::Export(e) => v.visit_expr(&e.item),
-        ExprKind::ExportEnv(e) => v.visit_block(&e.body),
-        ExprKind::If(i) => {
-            v.visit_expr(&i.condition);
-            v.visit_block(&i.then_block);
-            if let Some(e) = &i.else_branch {
-                v.visit_expr(&e.body);
+        Expr::Export(export) => visitor.visit_expression(&export.item),
+        Expr::ExportEnv(export_env) => visitor.visit_block(&export_env.body),
+        Expr::If(if_expression) => {
+            visitor.visit_expression(&if_expression.condition);
+            visitor.visit_block(&if_expression.then_block);
+            if let Some(else_branch) = &if_expression.else_branch {
+                visitor.visit_expression(&else_branch.body);
             }
         }
-        ExprKind::Match(m) => {
-            v.visit_expr(&m.value);
-            for arm in &m.arms {
-                v.visit_pattern(&arm.pattern);
-                if let Some(g) = &arm.guard {
-                    v.visit_expr(g);
+        Expr::Match(match_expression) => {
+            visitor.visit_expression(&match_expression.value);
+            for arm in &match_expression.arms {
+                visitor.visit_match_pattern(&arm.pattern);
+                if let Some(guard) = &arm.guard {
+                    visitor.visit_expression(guard);
                 }
-                v.visit_expr(&arm.body);
+                visitor.visit_expression(&arm.body);
             }
-            if let Some(b) = &m.value_block {
-                v.visit_expr(b);
-            }
-        }
-        ExprKind::For(f) => {
-            if let Some(ty) = &f.ty {
-                v.visit_type(ty);
-            }
-            v.visit_expr(&f.iterable);
-            v.visit_block(&f.body);
-        }
-        ExprKind::While(w) => {
-            v.visit_expr(&w.condition);
-            v.visit_block(&w.body);
-        }
-        ExprKind::Loop(l) => v.visit_block(&l.body),
-        ExprKind::Return(r) => {
-            if let Some(e) = &r.value {
-                v.visit_expr(e);
+            if let Some(value_block) = &match_expression.value_block {
+                visitor.visit_expression(value_block);
             }
         }
-        ExprKind::Try(t) => {
-            v.visit_block(&t.body);
-            for h in &t.handlers {
-                v.visit_expr(&h.body);
+        Expr::For(for_loop) => {
+            if let Some(ty) = &for_loop.ty {
+                visitor.visit_type_annotation(ty);
+            }
+            visitor.visit_expression(&for_loop.iterable);
+            visitor.visit_block(&for_loop.body);
+        }
+        Expr::While(while_loop) => {
+            visitor.visit_expression(&while_loop.condition);
+            visitor.visit_block(&while_loop.body);
+        }
+        Expr::Loop(loop_expression) => visitor.visit_block(&loop_expression.body),
+        Expr::Return(return_expression) => {
+            if let Some(value) = &return_expression.value {
+                visitor.visit_expression(value);
             }
         }
-        ExprKind::Where(w) => v.visit_expr(&w.condition),
+        Expr::Try(try_expression) => {
+            visitor.visit_block(&try_expression.body);
+            for handler in &try_expression.handlers {
+                visitor.visit_expression(&handler.body);
+            }
+        }
+        Expr::Where(where_expression) => visitor.visit_expression(&where_expression.condition),
     }
 }
 
-fn walk_args<'a, V: Visitor<'a> + ?Sized>(v: &mut V, args: &[Arg<'a>]) {
+fn walk_arguments<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, args: &[Argument<'a>]) {
     for arg in args {
         match arg {
-            Arg::Positional(e) | Arg::Spread { expr: e, .. } => v.visit_expr(e),
-            Arg::Flag(f) => {
-                if let Some(e) = &f.value {
-                    v.visit_expr(e);
+            Argument::Positional(expr) | Argument::Spread { expr, .. } => visitor.visit_expression(expr),
+            Argument::Named(flag) => {
+                if let Some(value) = &flag.value {
+                    visitor.visit_expression(value);
                 }
             }
-            Arg::EndOfOptions(_) => {}
+            Argument::EndOfOptions(_) => {}
         }
     }
 }
 
 /// Visit the children of a signature.
-pub fn walk_signature<'a, V: Visitor<'a> + ?Sized>(v: &mut V, sig: &Signature<'a>) {
-    for p in &sig.params {
-        v.visit_param(p);
+pub fn walk_signature<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, sig: &Signature<'a>) {
+    for parameter in &sig.params {
+        visitor.visit_parameter(parameter);
     }
-    for io in &sig.io_types {
-        v.visit_type(&io.input);
-        v.visit_type(&io.output);
+    for io in &sig.input_output_types {
+        visitor.visit_type_annotation(&io.input);
+        visitor.visit_type_annotation(&io.output);
     }
 }
 
 /// Visit the children of a parameter.
-pub fn walk_param<'a, V: Visitor<'a> + ?Sized>(v: &mut V, param: &Param<'a>) {
+pub fn walk_parameter<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, param: &Parameter<'a>) {
     if let Some(ty) = &param.ty {
-        v.visit_type(ty);
+        visitor.visit_type_annotation(ty);
     }
-    if let Some(d) = &param.default {
-        v.visit_expr(d);
+    if let Some(default) = &param.default {
+        visitor.visit_expression(default);
     }
-    for c in &param.description {
-        v.visit_comment(c);
+    for comment in &param.description {
+        visitor.visit_comment(comment);
     }
 }
 
 /// Visit the children of a type annotation.
-pub fn walk_type<'a, V: Visitor<'a> + ?Sized>(v: &mut V, ty: &TypeAnnotation<'a>) {
-    match &ty.kind {
-        TypeKind::List(Some(inner)) => v.visit_type(inner),
-        TypeKind::Record(fields) | TypeKind::Table(fields) => {
-            for f in fields {
-                v.visit_type(&f.ty);
+pub fn walk_type_annotation<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, ty: &TypeAnnotation<'a>) {
+    match &ty.shape {
+        SyntaxShape::List(Some(inner)) => visitor.visit_type_annotation(inner),
+        SyntaxShape::Record(fields) | SyntaxShape::Table(fields) => {
+            for field in fields {
+                visitor.visit_type_annotation(&field.ty);
             }
         }
-        TypeKind::OneOf(types) => {
-            for t in types {
-                v.visit_type(t);
+        SyntaxShape::OneOf(types) => {
+            for ty in types {
+                visitor.visit_type_annotation(ty);
             }
         }
         _ => {}
@@ -347,18 +349,18 @@ pub fn walk_type<'a, V: Visitor<'a> + ?Sized>(v: &mut V, ty: &TypeAnnotation<'a>
 }
 
 /// Visit the children of a pattern.
-pub fn walk_pattern<'a, V: Visitor<'a> + ?Sized>(v: &mut V, pattern: &Pattern<'a>) {
-    match &pattern.kind {
-        PatternKind::Value(e) => v.visit_expr(e),
-        PatternKind::Variable(_) | PatternKind::Wildcard | PatternKind::Rest(_) => {}
-        PatternKind::List(items) | PatternKind::Or(items) => {
-            for p in items {
-                v.visit_pattern(p);
+pub fn walk_match_pattern<'a, V: Visitor<'a> + ?Sized>(visitor: &mut V, pattern: &MatchPattern<'a>) {
+    match &pattern.pattern {
+        Pattern::Expression(expr) => visitor.visit_expression(expr),
+        Pattern::Variable(_) | Pattern::IgnoreValue | Pattern::Rest(_) | Pattern::IgnoreRest => {}
+        Pattern::List(items) | Pattern::Or(items) => {
+            for item in items {
+                visitor.visit_match_pattern(item);
             }
         }
-        PatternKind::Record(fields) => {
-            for (_, p) in fields {
-                v.visit_pattern(p);
+        Pattern::Record(fields) => {
+            for (_, pattern) in fields {
+                visitor.visit_match_pattern(pattern);
             }
         }
     }

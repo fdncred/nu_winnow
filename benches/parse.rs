@@ -1,7 +1,8 @@
 //! Throughput benchmarks: `cargo bench`.
 
-use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use nu_winnow_parser::{ParseConfig, parse_lenient, parse_with};
+use std::hint::black_box;
 
 const KITCHEN_SINK: &str = include_str!("../tests/corpus/kitchen_sink.nu");
 const STD_ITER: &str = include_str!("../tests/corpus/std_iter.nu");
@@ -37,8 +38,7 @@ fn bench_parse(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(KITCHEN_SINK.len() as u64));
     group.bench_function("kitchen_sink", |b| {
         b.iter(|| {
-            nu_winnow_parser::lexer::lex(black_box(KITCHEN_SINK), 0, nu_winnow_parser::lexer::LexOptions::BLOCK)
-                .unwrap()
+            nu_winnow_parser::lex::lex(black_box(KITCHEN_SINK), 0, nu_winnow_parser::lex::LexOptions::BLOCK).unwrap()
         })
     });
     group.finish();

@@ -50,7 +50,7 @@ but whitespace, so:
   `;` terminators, `=`, `else`, `catch`/`finally`, `in`, `=>`, record
   colons, range operators, redirection operators, spread dots, closure
   parameter bars, and the keyword of every statement through
-  `Expr::keyword_span()`.
+  `Expression::keyword_span()`.
 
 Every example below is a doctest (`cargo test --doc`), so it runs against
 the current API.
@@ -87,16 +87,16 @@ odd spacing must all survive. Collect the spans with a `Visitor`, then splice
 the replacement text into the source:
 
 ```rust
-use nu_winnow_parser::{parse, Span, ast::{Visitor, Expr, ExprKind, walk_expr}};
+use nu_winnow_parser::{parse, Span, ast::{Visitor, Expression, Expr, walk_expression}};
 
 struct VarSpans(Vec<Span>);
 
 impl<'a> Visitor<'a> for VarSpans {
-    fn visit_expr(&mut self, e: &Expr<'a>) {
-        if let ExprKind::Var(v) = &e.kind && v.name == "x" {
-            self.0.push(e.span);
+    fn visit_expression(&mut self, expression: &Expression<'a>) {
+        if let Expr::Var(var) = &expression.expr && var.name == "x" {
+            self.0.push(expression.span);
         }
-        walk_expr(self, e);
+        walk_expression(self, expression);
     }
 }
 
@@ -127,24 +127,24 @@ The tree holds decoded values; the span holds what was written. A formatter
 uses the span, a linter or evaluator uses the value:
 
 ```rust
-use nu_winnow_parser::{parse, ast::{ExprKind, ListItem, Quote}};
+use nu_winnow_parser::{parse, ast::{Expr, ListItem, Quote}};
 
 let src = r#"[1_000 0xFF 'it''s' "a\tb" `raw ws` r#'no "escapes"'#]"#;
 let ast = parse(src).unwrap();
-let ExprKind::List(items) = &ast.block.pipelines[0].elements[0].expr.kind else { panic!() };
+let Expr::List(items) = &ast.block.pipelines[0].elements[0].expr.expr else { panic!() };
 let item = |i: usize| match &items[i] { ListItem::Item(e) => e, _ => unreachable!() };
 
-assert!(matches!(item(0).kind, ExprKind::Int(1000)));
+assert!(matches!(item(0).expr, Expr::Int(1000)));
 assert_eq!(item(0).span.slice(src), "1_000");          // spelling kept for the formatter
-assert!(matches!(item(1).kind, ExprKind::Int(255)));
+assert!(matches!(item(1).expr, Expr::Int(255)));
 assert_eq!(item(1).span.slice(src), "0xFF");
 
-let ExprKind::String(s) = &item(3).kind else { panic!() };
+let Expr::String(s) = &item(3).expr else { panic!() };
 assert_eq!(s.value, "a\tb");                            // decoded: a real tab
 assert_eq!(s.quote, Quote::Double);
 assert_eq!(item(3).span.slice(src), r#""a\tb""#);       // written: backslash-t
 
-let ExprKind::String(raw) = &item(5).kind else { panic!() };
+let Expr::String(raw) = &item(5).expr else { panic!() };
 assert_eq!(raw.quote, Quote::Raw(1));
 assert_eq!(raw.value, r#"no "escapes""#);
 ```
@@ -174,8 +174,8 @@ assert_eq!(ls.leading_comments[0].body(src), "leading");
 assert_eq!(ls.trailing_comments[0].body(src), "trailing");
 let def = &ast.block.pipelines[1];
 assert_eq!(def.leading_comments[0].body(src), "doc for def");    // the blank line dropped `detached`
-match &def.elements[0].expr.kind {
-    nu_winnow_parser::ast::ExprKind::Def(d) => {
+match &def.elements[0].expr.expr {
+    nu_winnow_parser::ast::Expr::Def(d) => {
         assert_eq!(d.signature.params[0].description[0].body(src), "the x");
     }
     _ => unreachable!(),
@@ -190,8 +190,8 @@ by looking at the *outer* span of the construct in the source:
 
 ```rust,ignore
 fn can_be_compact(&self, outer: Span) -> bool {
-    let text = self.text(outer);
-    !text.contains('\n') && !self.comments_inside(outer)
+    !self.spans_lines(outer)
+        && !self.comments.iter().any(|c| outer.start <= c.span.start && c.span.end <= outer.end)
 }
 ```
 
@@ -207,11 +207,12 @@ themselves from the source.
 2. `block_body` walks pipelines. Before each one it flushes the comments that
    precede it; after each one it prints the trailing comments on its line.
 3. Every atom (number, string, variable, cell path, flag, operator) is
-   emitted with `self.word(self.text(span))`: copied from the source,
-   separated by one space.
+   emitted with `self.spanned(span)`, which copies `self.text(span)` from
+   the source, separated by one space (or by the source's spacing with
+   `keep_alignment`).
 4. Containers (`list`, `record`, `braced_block`, `match_block`, `args`) decide
    compact or multi-line from their outer span and recurse.
-5. Keywords are emitted from `ExprKind::keyword()`; punctuation such as `=`
+5. Keywords are emitted from `Expr::keyword()`; punctuation such as `=`
    and `=>` from their recorded spans.
 
 `tests/nufmt.rs` holds the formatter to three properties over every corpus

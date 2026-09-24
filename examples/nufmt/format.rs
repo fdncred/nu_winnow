@@ -528,13 +528,13 @@ impl<'a> Formatter<'a> {
     /// The statement family used to group top-level declarations.
     fn family(pipeline: &Pipeline<'a>) -> Option<Family> {
         let mut expr = &pipeline.elements.first()?.expr;
-        if let ExprKind::Export(x) = &expr.kind {
+        if let Expr::Export(x) = &expr.expr {
             expr = &x.item;
         }
-        match &expr.kind {
-            ExprKind::Use(_) => Some(Family::Use),
-            ExprKind::Let(_) | ExprKind::Mut(_) => Some(Family::Variable),
-            ExprKind::Const(_) => Some(Family::Constant),
+        match &expr.expr {
+            Expr::Use(_) => Some(Family::Use),
+            Expr::Let(_) | Expr::Mut(_) => Some(Family::Variable),
+            Expr::Const(_) => Some(Family::Constant),
             _ => None,
         }
     }
@@ -547,8 +547,8 @@ impl<'a> Formatter<'a> {
     /// The pipeline inside `e` when `e` is a `( ... )` holding exactly one
     /// pipeline whose pipes and arguments are on one line, with no `;` and no
     /// comment, i.e. parentheses that may be redundant.
-    fn parenthesised<'e>(&self, e: &'e Expr<'a>) -> Option<&'e Pipeline<'a>> {
-        let ExprKind::Subexpression(b) = &e.kind else { return None };
+    fn parenthesised<'e>(&self, e: &'e Expression<'a>) -> Option<&'e Pipeline<'a>> {
+        let Expr::Subexpression(b) = &e.expr else { return None };
         match b.pipelines.as_slice() {
             [p] if p.terminator.is_none()
                 && !self.pipeline_is_multiline(p)
@@ -563,10 +563,10 @@ impl<'a> Formatter<'a> {
 
     /// `true` if a call in the pipeline has arguments on more than one line.
     fn args_multiline(&self, p: &Pipeline<'a>) -> bool {
-        p.elements.iter().any(|e| match &e.expr.kind {
-            ExprKind::Call(c) => {
+        p.elements.iter().any(|e| match &e.expr.expr {
+            Expr::Call(c) => {
                 let mut prev = c.head.span.end;
-                c.args.iter().any(|a| {
+                c.arguments.iter().any(|a| {
                     let split = self.multiline_between(prev, a.span().start);
                     prev = a.span().end;
                     split
@@ -620,7 +620,7 @@ impl<'a> Formatter<'a> {
             && let [element] = pipeline.elements.as_slice()
             && element.redirection.is_none()
             && let Some(inner) = self.parenthesised(&element.expr)
-            && !matches!(inner.elements.as_slice(), [only] if matches!(only.expr.kind, ExprKind::BinaryOp(_)))
+            && !matches!(inner.elements.as_slice(), [only] if matches!(only.expr.expr, Expr::BinaryOp(_)))
         {
             self.pipeline_with(inner, true);
             if pipeline.terminator.is_some() {
@@ -660,12 +660,8 @@ impl<'a> Formatter<'a> {
                 && let [only] = inner.elements.as_slice()
                 && only.redirection.is_none()
                 && matches!(
-                    only.expr.kind,
-                    ExprKind::Call(_)
-                        | ExprKind::DynamicCall(_)
-                        | ExprKind::ExternalCall(_)
-                        | ExprKind::Var(_)
-                        | ExprKind::FullCellPath(_)
+                    only.expr.expr,
+                    Expr::Call(_) | Expr::DynamicCall(_) | Expr::ExternalCall(_) | Expr::Var(_) | Expr::FullCellPath(_)
                 )
             {
                 expr = &only.expr;
@@ -681,23 +677,23 @@ impl<'a> Formatter<'a> {
     }
 
     /// The condition of `if`/`while`: `(x)` around a single value is dropped.
-    fn condition(&mut self, e: &Expr<'a>) {
+    fn condition(&mut self, e: &Expression<'a>) {
         if self.options.strip_redundant_parens
             && let Some(inner) = self.parenthesised(e)
             && let [only] = inner.elements.as_slice()
             && only.redirection.is_none()
             && matches!(
-                only.expr.kind,
-                ExprKind::Bool(_)
-                    | ExprKind::Int(_)
-                    | ExprKind::Float(_)
-                    | ExprKind::String(_)
-                    | ExprKind::Var(_)
-                    | ExprKind::CellPath(_)
-                    | ExprKind::FullCellPath(_)
-                    | ExprKind::BinaryOp(_)
-                    | ExprKind::UnaryNot(_)
-                    | ExprKind::Subexpression(_)
+                only.expr.expr,
+                Expr::Bool(_)
+                    | Expr::Int(_)
+                    | Expr::Float(_)
+                    | Expr::String(_)
+                    | Expr::Var(_)
+                    | Expr::CellPath(_)
+                    | Expr::FullCellPath(_)
+                    | Expr::BinaryOp(_)
+                    | Expr::UnaryNot(_)
+                    | Expr::Subexpression(_)
             )
         {
             return self.condition(&only.expr);
@@ -705,17 +701,17 @@ impl<'a> Formatter<'a> {
         self.expr(e);
     }
 
-    fn redirection(&mut self, r: &Redirection<'a>) {
+    fn redirection(&mut self, r: &PipelineRedirection<'a>) {
         // A `e>|` target is the pipe of the next element and is written there.
-        let target = |f: &mut Self, t: &RedirectTarget<'a>| {
-            if let RedirectTarget::File { op, path, .. } = t {
+        let target = |f: &mut Self, t: &RedirectionTarget<'a>| {
+            if let RedirectionTarget::File { op, path, .. } = t {
                 f.spanned(op.span);
                 f.expr(path);
             }
         };
         match r {
-            Redirection::Single { target: t, .. } => target(self, t),
-            Redirection::Separate { out, err } => {
+            PipelineRedirection::Single { target: t, .. } => target(self, t),
+            PipelineRedirection::Separate { out, err } => {
                 target(self, out);
                 target(self, err);
             }
@@ -752,24 +748,24 @@ impl<'a> Formatter<'a> {
     /// a command: a literal, variable, cell path, interpolation, range, or
     /// operator expression over those.
     fn is_simple_pipeline(&self, p: &Pipeline<'a>) -> bool {
-        fn simple(e: &Expr<'_>) -> bool {
-            match &e.kind {
-                ExprKind::Bool(_)
-                | ExprKind::Nothing
-                | ExprKind::Int(_)
-                | ExprKind::Float(_)
-                | ExprKind::String(_)
-                | ExprKind::Binary(_)
-                | ExprKind::Duration(_)
-                | ExprKind::Filesize(_)
-                | ExprKind::DateTime(_)
-                | ExprKind::Var(_)
-                | ExprKind::CellPath(_)
-                | ExprKind::Interpolation(_)
-                | ExprKind::Range(_) => true,
-                ExprKind::FullCellPath(p) => simple(&p.head),
-                ExprKind::BinaryOp(b) => simple(&b.lhs) && simple(&b.rhs),
-                ExprKind::UnaryNot(n) => simple(&n.expr),
+        fn simple(e: &Expression<'_>) -> bool {
+            match &e.expr {
+                Expr::Bool(_)
+                | Expr::Nothing
+                | Expr::Int(_)
+                | Expr::Float(_)
+                | Expr::String(_)
+                | Expr::Binary(_)
+                | Expr::Duration(_)
+                | Expr::Filesize(_)
+                | Expr::DateTime(_)
+                | Expr::Var(_)
+                | Expr::CellPath(_)
+                | Expr::StringInterpolation(_)
+                | Expr::Range(_) => true,
+                Expr::FullCellPath(p) => simple(&p.head),
+                Expr::BinaryOp(b) => simple(&b.lhs) && simple(&b.rhs),
+                Expr::UnaryNot(n) => simple(&n.expr),
                 _ => false,
             }
         }
@@ -848,20 +844,19 @@ impl<'a> Formatter<'a> {
 
     // --- signatures ------------------------------------------------------------------
 
-    fn param(&self, p: &Param<'a>) -> String {
+    fn param(&self, p: &Parameter<'a>) -> String {
         let mut s = String::new();
         match &p.kind {
-            ParamKind::Positional { optional } => {
+            ParameterKind::Required => s.push_str(p.name.item),
+            ParameterKind::Optional => {
                 s.push_str(p.name.item);
-                if *optional {
-                    s.push('?');
-                }
+                s.push('?');
             }
-            ParamKind::Rest => {
+            ParameterKind::Rest => {
                 s.push_str("...");
                 s.push_str(p.name.item);
             }
-            ParamKind::Flag { long, short } => {
+            ParameterKind::Flag { long, short } => {
                 if let Some(l) = long {
                     s.push_str("--");
                     s.push_str(l.item);
@@ -930,9 +925,9 @@ impl<'a> Formatter<'a> {
             let inline = self.signature_inline(sig);
             self.word(&format!("[{inline}]"));
         }
-        if let Some(io) = sig.io_span {
+        if let Some(io) = sig.input_output_span {
             let types: Vec<String> = sig
-                .io_types
+                .input_output_types
                 .iter()
                 .map(|t| format!("{} -> {}", self.text(t.input.span), self.text(t.output.span)))
                 .collect();
@@ -952,7 +947,7 @@ impl<'a> Formatter<'a> {
 
     /// The arguments of a call whose head ends at `prev_end`; an argument the
     /// author put on a new line starts a new, indented line.
-    fn args(&mut self, mut prev_end: Option<usize>, args: &[Arg<'a>]) {
+    fn args(&mut self, mut prev_end: Option<usize>, args: &[Argument<'a>]) {
         let mut indented = false;
         for arg in args {
             let span = arg.span();
@@ -969,8 +964,8 @@ impl<'a> Formatter<'a> {
             }
             prev_end = Some(span.end);
             match arg {
-                Arg::Positional(e) => self.expr(e),
-                Arg::Flag(f) => {
+                Argument::Positional(e) => self.expr(e),
+                Argument::Named(f) => {
                     let dashes = if f.long { "--" } else { "-" };
                     match &f.value {
                         Some(v) => {
@@ -980,11 +975,11 @@ impl<'a> Formatter<'a> {
                         None => self.word(&format!("{dashes}{}", f.name)),
                     }
                 }
-                Arg::Spread { expr, .. } => {
+                Argument::Spread { expr, .. } => {
                     self.word("...");
                     self.glued(|f| f.expr(expr));
                 }
-                Arg::EndOfOptions(_) => self.word("--"),
+                Argument::EndOfOptions(_) => self.word("--"),
             }
         }
         if indented {
@@ -1087,7 +1082,7 @@ impl<'a> Formatter<'a> {
     /// [`Options::expand_complex_records`]).
     fn complex_value(item: &RecordItem<'a>) -> bool {
         matches!(item, RecordItem::Pair { value, .. }
-            if matches!(value.kind, ExprKind::Record(_) | ExprKind::Closure(_) | ExprKind::Block(_)))
+            if matches!(value.expr, Expr::Record(_) | Expr::Closure(_) | Expr::Block(_)))
     }
 
     fn record(&mut self, items: &[RecordItem<'a>], outer: Span) {
@@ -1236,10 +1231,10 @@ impl<'a> Formatter<'a> {
     /// A match pattern, copied from the source with its spacing normalised;
     /// a quoted string that is a plain identifier loses its quotes when
     /// [`Options::unquote_match_patterns`] is set.
-    fn pattern(&mut self, p: &Pattern<'a>) {
+    fn pattern(&mut self, p: &MatchPattern<'a>) {
         if self.options.unquote_match_patterns
-            && let PatternKind::Value(e) = &p.kind
-            && let ExprKind::String(s) = &e.kind
+            && let Pattern::Expression(e) = &p.pattern
+            && let Expr::String(s) = &e.expr
             && matches!(s.quote, Quote::Single | Quote::Double)
             && Self::identifier_safe(&s.value)
         {
@@ -1266,54 +1261,54 @@ impl<'a> Formatter<'a> {
             && !RESERVED.contains(&word)
     }
 
-    fn expr(&mut self, e: &Expr<'a>) {
+    fn expr(&mut self, e: &Expression<'a>) {
         let span = e.span;
-        match &e.kind {
-            ExprKind::Bool(_)
-            | ExprKind::Nothing
-            | ExprKind::Int(_)
-            | ExprKind::Float(_)
-            | ExprKind::String(_)
-            | ExprKind::Binary(_)
-            | ExprKind::Duration(_)
-            | ExprKind::Filesize(_)
-            | ExprKind::DateTime(_)
-            | ExprKind::Var(_)
-            | ExprKind::CellPath(_)
-            | ExprKind::Interpolation(_)
-            | ExprKind::Range(_)
-            | ExprKind::Garbage => self.spanned(span),
-            ExprKind::FullCellPath(p) => {
-                if p.implicit_head && p.members.len() == 1 && self.compact_comparison(span) {
+        match &e.expr {
+            Expr::Bool(_)
+            | Expr::Nothing
+            | Expr::Int(_)
+            | Expr::Float(_)
+            | Expr::String(_)
+            | Expr::Binary(_)
+            | Expr::Duration(_)
+            | Expr::Filesize(_)
+            | Expr::DateTime(_)
+            | Expr::Var(_)
+            | Expr::CellPath(_)
+            | Expr::StringInterpolation(_)
+            | Expr::Range(_)
+            | Expr::Garbage => self.spanned(span),
+            Expr::FullCellPath(p) => {
+                if p.implicit_head && p.tail.len() == 1 && self.compact_comparison(span) {
                     return;
                 }
                 self.expr(&p.head);
                 let tail = Span::new(p.head.span.end, span.end);
                 self.glue(self.text(tail));
             }
-            ExprKind::List(items) => self.list(items, span),
-            ExprKind::Table(t) => self.table(t, span),
-            ExprKind::Record(items) => self.record(items, span),
-            ExprKind::Closure(c) => self.closure(c, span),
-            ExprKind::Block(b) => self.braced_block(b, span, false),
-            ExprKind::Subexpression(b) => self.subexpression(b, span),
-            ExprKind::BinaryOp(b) => {
+            Expr::List(items) => self.list(items, span),
+            Expr::Table(t) => self.table(t, span),
+            Expr::Record(items) => self.record(items, span),
+            Expr::Closure(c) => self.closure(c, span),
+            Expr::Block(b) => self.braced_block(b, span, false),
+            Expr::Subexpression(b) => self.subexpression(b, span),
+            Expr::BinaryOp(b) => {
                 let boolean = matches!(b.op.item, Operator::Boolean(_));
                 self.row_condition_operand(&b.lhs, boolean);
                 self.spanned(b.op.span);
                 self.row_condition_operand(&b.rhs, boolean);
             }
-            ExprKind::UnaryNot(n) => {
+            Expr::UnaryNot(n) => {
                 self.word("not");
                 self.expr(&n.expr);
             }
-            ExprKind::Assignment(a) => {
+            Expr::Assignment(a) => {
                 self.expr(&a.lhs);
                 self.spanned_as(a.op.span, a.op.item.as_str());
                 self.inline_block(&a.rhs);
             }
-            ExprKind::Call(c) => {
-                if c.args.is_empty() && self.repair_packed_if(c.head.span) {
+            Expr::Call(c) => {
+                if c.arguments.is_empty() && self.repair_packed_if(c.head.span) {
                     return;
                 }
                 let head = Self::collapse_spaces(self.text(c.head.span));
@@ -1328,48 +1323,48 @@ impl<'a> Formatter<'a> {
                     }
                     None => self.spanned_as(c.head.span, &head),
                 }
-                self.args(Some(c.head.span.end), &c.args);
+                self.args(Some(c.head.span.end), &c.arguments);
             }
-            ExprKind::DynamicCall(d) => {
+            Expr::DynamicCall(d) => {
                 self.spanned_as(d.sigil, "%");
                 if d.sigil.end == d.head.span.start {
                     self.glued(|f| f.expr(&d.head));
                 } else {
                     self.expr(&d.head);
                 }
-                self.args(Some(d.head.span.end), &d.args);
+                self.args(Some(d.head.span.end), &d.arguments);
             }
-            ExprKind::ExternalCall(c) => {
+            Expr::ExternalCall(c) => {
                 self.word("^");
                 self.glued(|f| f.expr(&c.head));
-                for arg in &c.args {
+                for arg in &c.arguments {
                     match arg {
-                        ExternalArg::Regular(e) => self.expr(e),
-                        ExternalArg::Spread { expr, .. } => {
+                        ExternalArgument::Regular(e) => self.expr(e),
+                        ExternalArgument::Spread { expr, .. } => {
                             self.word("...");
                             self.glued(|f| f.expr(expr));
                         }
                     }
                 }
             }
-            ExprKind::EnvShorthand(e) => {
+            Expr::EnvShorthand(e) => {
                 for v in &e.vars {
                     self.spanned(v.span);
                 }
                 self.expr(&e.expr);
             }
-            ExprKind::AttributeBlock(a) => {
+            Expr::AttributeBlock(a) => {
                 for attr in &a.attributes {
                     self.word(&format!("@{}", attr.name.item));
-                    self.args(None, &attr.args);
+                    self.args(None, &attr.arguments);
                     self.trailing_comments(attr.span.end);
                     self.newline();
                 }
                 self.flush_comments(a.item.span.start);
                 self.expr(&a.item);
             }
-            ExprKind::Let(b) | ExprKind::Mut(b) | ExprKind::Const(b) => {
-                self.word(e.kind.keyword().unwrap_or("let"));
+            Expr::Let(b) | Expr::Mut(b) | Expr::Const(b) => {
+                self.word(e.expr.keyword().unwrap_or("let"));
                 match &b.ty {
                     Some(ty) => {
                         self.spanned_as(b.name.span, &format!("{}: {}", b.name.item, self.text(ty.span)));
@@ -1385,7 +1380,7 @@ impl<'a> Formatter<'a> {
                     self.inline_block(value);
                 }
             }
-            ExprKind::Def(d) => {
+            Expr::Def(d) => {
                 self.word("def");
                 for f in &d.flags {
                     self.spanned(f.span);
@@ -1402,12 +1397,12 @@ impl<'a> Formatter<'a> {
                     None => self.braced_block(&d.body, outer, self.options.expand_def_bodies),
                 }
             }
-            ExprKind::Extern(x) => {
+            Expr::Extern(x) => {
                 self.word("extern");
                 self.spanned(x.name.span);
                 self.signature(&x.signature);
             }
-            ExprKind::Alias(a) => {
+            Expr::Alias(a) => {
                 self.word("alias");
                 self.spanned(a.name.span);
                 self.word("=");
@@ -1415,29 +1410,29 @@ impl<'a> Formatter<'a> {
                     self.expr(value);
                 }
             }
-            ExprKind::Use(u) => {
+            Expr::Use(u) => {
                 self.word("use");
                 self.expr(&u.module);
                 for m in &u.members {
                     self.spanned_as(m.span, &Self::collapse_spaces(self.text(m.span)));
                 }
             }
-            ExprKind::Module(m) => {
+            Expr::Module(m) => {
                 self.word("module");
                 self.expr(&m.name);
                 if let Some(b) = &m.body {
                     self.braced_block(b, Span::new(m.name.span.end, span.end), false);
                 }
             }
-            ExprKind::Export(x) => {
+            Expr::Export(x) => {
                 self.word("export");
                 self.expr(&x.item);
             }
-            ExprKind::ExportEnv(x) => {
+            Expr::ExportEnv(x) => {
                 self.word("export-env");
                 self.braced_block(&x.body, Span::new(span.start + "export-env".len(), span.end), false);
             }
-            ExprKind::If(i) => {
+            Expr::If(i) => {
                 self.word("if");
                 self.condition(&i.condition);
                 let then_end = i.else_branch.as_ref().map_or(span.end, |e| e.keyword.start);
@@ -1447,8 +1442,8 @@ impl<'a> Formatter<'a> {
                     self.expr(&e.body);
                 }
             }
-            ExprKind::Match(m) => self.match_block(m),
-            ExprKind::For(f) => {
+            Expr::Match(m) => self.match_block(m),
+            Expr::For(f) => {
                 self.word("for");
                 match &f.ty {
                     Some(ty) => self.word(&format!("{}: {}", f.var.item, self.text(ty.span))),
@@ -1458,24 +1453,24 @@ impl<'a> Formatter<'a> {
                 self.expr(&f.iterable);
                 self.braced_block(&f.body, Span::new(f.iterable.span.end, span.end), false);
             }
-            ExprKind::While(w) => {
+            Expr::While(w) => {
                 self.word("while");
                 self.condition(&w.condition);
                 self.braced_block(&w.body, Span::new(w.condition.span.end, span.end), false);
             }
-            ExprKind::Loop(l) => {
+            Expr::Loop(l) => {
                 self.word("loop");
                 self.braced_block(&l.body, Span::new(span.start + "loop".len(), span.end), false);
             }
-            ExprKind::Break => self.word("break"),
-            ExprKind::Continue => self.word("continue"),
-            ExprKind::Return(r) => {
+            Expr::Break => self.word("break"),
+            Expr::Continue => self.word("continue"),
+            Expr::Return(r) => {
                 self.word("return");
                 if let Some(v) = &r.value {
                     self.expr(v);
                 }
             }
-            ExprKind::Try(t) => {
+            Expr::Try(t) => {
                 self.word("try");
                 let body_end = t.handlers.first().map_or(span.end, |h| h.keyword.start);
                 self.braced_block(&t.body, Span::new(span.start + "try".len(), body_end), false);
@@ -1484,7 +1479,7 @@ impl<'a> Formatter<'a> {
                     self.expr(&h.body);
                 }
             }
-            ExprKind::Where(w) => {
+            Expr::Where(w) => {
                 self.word("where");
                 let saved = std::mem::replace(&mut self.row_condition, true);
                 self.expr(&w.condition);
@@ -1498,8 +1493,8 @@ impl<'a> Formatter<'a> {
     /// is the operand of `and`/`or`/`xor` (`where a > 1 and size>1kb`) is a
     /// string in Nushell, which the boolean operator always rejects, so it
     /// gets the same treatment as a bare column name.
-    fn row_condition_operand(&mut self, e: &Expr<'a>, boolean: bool) {
-        let bare_string = matches!(&e.kind, ExprKind::String(s) if s.quote == Quote::Bare);
+    fn row_condition_operand(&mut self, e: &Expression<'a>, boolean: bool) {
+        let bare_string = matches!(&e.expr, Expr::String(s) if s.quote == Quote::Bare);
         if self.row_condition && boolean && bare_string && self.compact_comparison(e.span) {
             return;
         }
@@ -1517,7 +1512,7 @@ impl<'a> Formatter<'a> {
         let Ok(ast) = parse_with(&spaced, &self.options.config) else { return false };
         let [pipeline] = ast.block.pipelines.as_slice() else { return false };
         let [element] = pipeline.elements.as_slice() else { return false };
-        if !matches!(element.expr.kind, ExprKind::If(_)) || pipeline.terminator.is_some() {
+        if !matches!(element.expr.expr, Expr::If(_)) || pipeline.terminator.is_some() {
             return false;
         }
         let mut sub = Formatter::new(&spaced, self.options, ast.comments.clone());

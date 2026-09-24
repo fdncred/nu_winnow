@@ -81,7 +81,7 @@ flags and examples in [`src/docs/how-to.md`](src/docs/how-to.md).
 | `ast::Visitor` | A visitor with `walk_*` defaults for building tools. |
 | `flatten::flatten(&Ast)` | Source-ordered `(Span, FlatShape)` pairs, like `nu-parser`'s `flatten_block`. |
 | `pretty::dump(&Ast)` | A human-readable tree. |
-| `lexer::lex` | The item lexer, usable on its own. |
+| `lex::lex`, `lex::lex_n_tokens` | The item lexer (nu-parser's `lex.rs`), usable on its own. |
 | `Span`, `LineIndex`, `Diagnostic`, `ParseError` | Positions and errors. |
 
 ### Configuration
@@ -104,15 +104,16 @@ directly, while keeping everything a formatter needs:
   it (`leading_comments` are the doc comments of a `def`).
 * `Block { pipelines }` → `Pipeline { elements, terminator }` →
   `PipelineElement { pipe, expr, redirection }`.
-* `Expr { span, kind: ExprKind }`. Statement keywords are `ExprKind` variants
-  (`Let`, `Def`, `If`, `Match`, ...) holding structs with a span for every
-  keyword and operator, so a formatter can reproduce the source layout.
+* `Expression { span, expr: Expr }`, as in `nu-protocol`. Statement keywords
+  are `Expr` variants (`Let`, `Def`, `If`, `Match`, ...) holding structs with a
+  span for every keyword and operator, so a formatter can reproduce the source
+  layout.
 * Strings keep their decoded `value` and their `Quote` style; the original
   spelling is `span.slice(source)`. Bare words, identifiers and un-escaped
   string bodies borrow from the source (`&'a str` / `Cow::Borrowed`).
-* Signatures record each parameter's kind, type annotation (as a `TypeKind`
-  tree), default value, completer and description comment, plus the
-  `input -> output` type pairs.
+* Signatures record each `Parameter`'s kind, type annotation (as a
+  `SyntaxShape` tree), default value, completer and description comment,
+  plus the `input -> output` type pairs.
 * `where` row conditions become `FullCellPath` nodes with `implicit_head`
   set and a zero-width `$it` head, matching Nushell's semantics.
 
@@ -152,21 +153,33 @@ and re-lexing the interior of an item when it turns out to be a list, a record
 or a block. This crate mirrors that design because it is what defines the
 language:
 
-1. `lexer` — a winnow parser over `LocatingSlice<&str>` that produces items,
+1. `lex` — a winnow parser over `LocatingSlice<&str>` that produces items,
    pipes, redirections, `;`, newlines, comments and assignment operators, with
    `LexOptions` selecting which bytes are whitespace or "special" (so `,` is
    whitespace inside a list, `:` splits record keys, `.` splits cell paths).
-2. `parser::block` — winnow parsers over a `TokenSlice` that group tokens into
+2. `parser::lite_parser` and `parser::parse_pipelines` — winnow parsers over
+   `Tokens` (a winnow `Stream` of lexed tokens) that group tokens into
    pipelines and commands (comment attachment, `|` continuation across lines,
    `=` absorbing the rest of the line, redirections, attribute lines) with
    statement-level error recovery.
-3. `parser::statement` and `parser::expr` — keyword statements, calls and
-   math expressions (a precedence-climbing fold identical to `nu-parser`'s).
-4. `parser::value` and `parser::literal` — one item becomes an expression;
-   nested constructs re-lex their interior with the appropriate options.
+3. `parser::parse_keywords` and the files it dispatches to
+   (`parse_bindings`, `parse_def`, `parse_control_flow`, `parse_module`,
+   `parse_alias`, `parse_source`), `parser::parse_calls` and
+   `parser::parse_expressions` — keyword statements, calls and math
+   expressions (winnow's Pratt `expression().infix(..)` combinator with
+   `nu-parser`'s precedence table).
+4. `parser::parse_expressions`, `parser::parse_literals`,
+   `parser::parse_patterns` and `parser::parse_signatures` /
+   `parser::parse_shape_specs` — one item becomes an expression; nested
+   constructs re-lex their interior with the appropriate options.
 
-Every parser uses `Diagnostic` as its winnow error type, so backtracking and
-`cut_err` behave normally while errors carry absolute positions and context.
+The files and most functions carry the names of their `nu-parser`
+counterparts (`parse_def`, `parse_call`, `parse_cell_path`,
+`parse_full_signature`, ...), and the state they share is a `WorkingSet`
+with `StateWorkingSet`-style methods (`find_decl`, `add_predecl`, `error`,
+`get_span_contents`). Parsers return `ParseResult<T>`, whose small
+`ParseFailure` error makes backtracking between alternatives cheap while
+`cut` errors carry a `Diagnostic` with absolute positions and context.
 
 ## Comparison with `nu-parser`
 
@@ -310,7 +323,7 @@ disagreement and how to add coverage. In brief:
 * `src/docs/` — how the parser works, chapter by chapter, a how-to for every
   tool, and the Nushell integration plan; also rendered by `cargo doc` under
   `nu_winnow_parser::docs`.
-* Unit tests in each module (lexer, literals, flatten, spans, errors).
+* Unit tests in each module (`lex`, `parse_literals`, flatten, spans, errors).
 
 Run everything with `cargo test`; run the comparison with Nushell itself
 with `nu tools/scripts/verify.nu`; run the benchmarks with `cargo bench`.

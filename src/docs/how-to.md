@@ -171,7 +171,7 @@ cargo test --test traceability          # chapter 11 maps every nu-parser constr
 cargo test --test corpus                # every file in tests/corpus must parse cleanly
 cargo test --test nufmt                 # formatter idempotency and structure preservation
 cargo test --doc                        # the `rust` blocks in src/docs and the README
-cargo test --lib lexer                  # unit tests of one module
+cargo test --lib lex                    # unit tests of one module (src/lex.rs)
 cargo test --test syntax -- if_forms    # one test by name
 ```
 
@@ -271,8 +271,23 @@ cargo bench -- lexer/                   # the lexer alone
 
 Criterion prints a time per iteration and the change against the previous
 run; the HTML report is written under `target/criterion/`. Run it on a quiet
-machine, and run it twice when comparing two versions of the code: the first
-run stores the baseline.
+machine.
+
+To compare two versions of the code, save a named baseline on the first and
+compare the second against it:
+
+```nushell
+cargo bench --bench parse -- --save-baseline before     # on the code before the change
+# ... make the change ...
+cargo bench --bench parse -- --baseline before          # prints the change of every benchmark
+cargo bench --bench parse -- --baseline before snippets/   # or of one group
+```
+
+A named baseline stays put however often you run the comparison, unlike the
+"previous run" that a plain `cargo bench` overwrites. Check this after
+rewriting a parser with winnow combinators or touching a hot path (the lexer,
+`parse_value` on bare words, `is_math_expression_like` on command heads): a
+combinator can cost speed that a hand-written loop did not.
 
 ### Throughput with the example
 
@@ -457,7 +472,7 @@ cargo doc --open                           # the API plus these chapters under `
 ## Using the library from another crate
 
 ```rust
-use nu_winnow_parser::{parse, parse_with, parse_lenient, ParseConfig, ast::ExprKind, flatten::flatten};
+use nu_winnow_parser::{parse, parse_with, parse_lenient, ParseConfig, ast::Expr, flatten::flatten};
 
 // Strict: any diagnostic is an error.
 let ast = parse("ls | where size > 1kb | get name").unwrap();
@@ -466,8 +481,12 @@ assert_eq!(ast.block.pipelines[0].elements.len(), 3);
 // With extra command names, so `my cmd` is one head.
 let config = ParseConfig::new().add_commands(["my cmd"]);
 let ast = parse_with("my cmd --flag", &config).unwrap();
-match &ast.block.pipelines[0].elements[0].expr.kind {
-    ExprKind::Call(call) => assert_eq!(call.head.name, "my cmd"),
+// A pipeline element holds an `Expression`, whose `expr` is the `Expr` enum.
+match &ast.block.pipelines[0].elements[0].expr.expr {
+    Expr::Call(call) => {
+        assert_eq!(call.head.name, "my cmd");
+        assert!(call.get_named_arg("flag").is_some());
+    }
     other => panic!("{other:?}"),
 }
 

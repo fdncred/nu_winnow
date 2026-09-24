@@ -78,7 +78,7 @@ What the bridge shows about a real integration:
   pass over the finished tree. The parser itself stays engine-free and can be
   reused by tools.
 * The lowering pass is small (about 700 lines for the supported subset)
-  because the syntactic tree already has the right shape: one `ExprKind`
+  because the syntactic tree already has the right shape: one `Expr`
   variant per Nushell keyword, signatures parsed into parameters and types,
   match patterns as a tree.
 * What is *not* covered yet is precisely the module system: `use`, `module`,
