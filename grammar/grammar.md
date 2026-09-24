@@ -21,7 +21,7 @@ decision, not a gap. A `; here: none` annotation, or a rule marked
 
 ## 0. Notation and reading the annotations
 
-```bnf
+```ebnf
 <name> ::= alt1 | alt2      a rule; terminals are in double quotes
 [ x ]                       optional
 { x }                       zero or more
@@ -57,7 +57,7 @@ Two facts about nu-parser shape everything below and are easy to forget:
 
 ### 1.1 Layout
 
-```bnf
+```ebnf
 <source-file>     ::= [ <shebang> ] <token-stream>
 ; a leading "#!" line is an ordinary comment to the lexer; the lite parse (2)
 ; groups the token stream into <block-tokens>
@@ -92,7 +92,7 @@ Two facts about nu-parser shape everything below and are easy to forget:
 
 ### 1.2 Tokens
 
-```bnf
+```ebnf
 <token-stream>    ::= { <token> }
 <token>           ::= <item> | <pipe> | <pipe-pipe> | <semicolon> | <eol>
                     | <comment> | <assignment-op> | <redirection-op>
@@ -146,7 +146,7 @@ Two facts about nu-parser shape everything below and are easy to forget:
 
 ### 1.3 Items
 
-```bnf
+```ebnf
 <item>            ::= 1*<item-part>
 <item-part>       ::= <plain-byte> | <quoted-run> | <interp-quoted-run> | <raw-string> | <bracketed-run>
 ; An item runs until, at bracket depth zero, a terminator byte is met: " " "\t"
@@ -230,7 +230,7 @@ this crate's `LexOptions` constants carry the same sets.
 
 ## 2. Blocks, pipelines and commands (the lite parse)
 
-```bnf
+```ebnf
 <block-tokens>    ::= { <separator> } [ <pipeline> { 1*<separator> <pipeline> } ] { <separator> }
 ; the lite parse of a <token-stream> (1.2)
 <separator>       ::= <eol> | <semicolon> | <comment-line>
@@ -316,7 +316,7 @@ this crate's `LexOptions` constants carry the same sets.
 
 ### 2.1 Which parser sees a command
 
-```bnf
+```ebnf
 <parsed-pipeline> ::= <single-command-pipeline> | <multi-command-pipeline>
 ; nu: parse_pipelines.rs:87 parse_pipeline
 
@@ -346,7 +346,7 @@ this crate's `LexOptions` constants carry the same sets.
 
 ### 3.1 Expression dispatch (`parse_expression`)
 
-```bnf
+```ebnf
 <pipeline-element> ::= { <env-shorthand> } <element-body>
 ; nu: parse_expressions.rs:1531 parse_expression
 
@@ -398,7 +398,7 @@ this crate's `LexOptions` constants carry the same sets.
 
 ### 3.2 Math expressions and operators
 
-```bnf
+```ebnf
 <math-expression> ::= <keyword-expression>
                     | <operand> { <operator> <operand-or-keyword> }
 <keyword-expression> ::= <if> | <match>                 ; (6.6)
@@ -450,7 +450,7 @@ Precedence (nu-protocol `ast/operator.rs:256`; higher binds tighter):
 
 ### 3.3 Assignment
 
-```bnf
+```ebnf
 <assignment>      ::= <assign-lhs> <assignment-op> <assign-rhs>
 <assign-lhs>      ::= <full-cell-path>          ; re-parsed with parse_expression; must come out a FullCellPath
 <assign-rhs>      ::= <block-tokens>            ; the absorbed tail (2), re-lexed and
@@ -469,7 +469,7 @@ Precedence (nu-protocol `ast/operator.rs:256`; higher binds tighter):
 
 ## 4. Calls
 
-```bnf
+```ebnf
 <call>            ::= <external-call> | <sigil-call> | <keyword-command> | <internal-call>
 ; nu: parse_calls.rs:1588 parse_call
 ; here: src/parser/expr.rs::parse_call
@@ -572,7 +572,7 @@ Each rule describes the text of one item.
 
 ### 5.1 Dispatch
 
-```bnf
+```ebnf
 <value>           ::= <dollar-expr>            ; item starts with "$"      (5.11)
                     | <paren-expr>             ; item starts with "("      (5.14)
                     | <brace-expr>             ; item starts with "{"      (5.15)
@@ -621,7 +621,7 @@ Each rule describes the text of one item.
 
 ### 5.2 Booleans, nothing, numbers
 
-```bnf
+```ebnf
 <bool>            ::= "true" | "false"
 <nothing>         ::= "null"
 ; nu: parse_expressions.rs:912-920   here: src/parser/value.rs::any_value
@@ -647,7 +647,7 @@ Each rule describes the text of one item.
 
 ### 5.3 Filesize and duration
 
-```bnf
+```ebnf
 ; a unit value is <unit-number> followed by a filesize or duration unit:
 <unit-number>     ::= ( <digit> | "." <digit> | "-" <digit> ) <any-chars>
 ; the first two bytes gate the attempt; the text before the unit, minus "_", must
@@ -666,7 +666,7 @@ Each rule describes the text of one item.
 
 ### 5.4 Datetime
 
-```bnf
+```ebnf
 <datetime>        ::= <date>                              ; "T00:00:00+00:00" appended
                     | <date> <time-sep> <time>            ; "+00:00" appended
                     | <date> <time-sep> <time> <offset>   ; full RFC 3339
@@ -684,7 +684,7 @@ Each rule describes the text of one item.
 
 ### 5.5 Binary
 
-```bnf
+```ebnf
 <binary>          ::= <binary-prefix> { <binary-sep> } { 1*<radix-digit> { <binary-sep> } } "]"
 <binary-prefix>   ::= "0x[" | "0o[" | "0b["
 <binary-sep>      ::= <whitespace> | "," | <eol> | ";" | <comment>
@@ -698,7 +698,7 @@ Each rule describes the text of one item.
 
 ### 5.6 Strings
 
-```bnf
+```ebnf
 <string>          ::= <bare-interpolation>     ; no leading quote and contains "("  (5.7)
                     | <double-quoted> | <single-quoted> | <backtick-quoted>
                     | <raw-string>
@@ -740,7 +740,7 @@ Each rule describes the text of one item.
 
 ### 5.7 Interpolation
 
-```bnf
+```ebnf
 <interpolation>   ::= "$" "\"" { <dq-text> | <interp-expr> } "\""   ; text parts unescaped
                     | "$" "'"  { <sq-text> | <interp-expr> } "'"    ; no escapes
                     | <bare-interpolation>
@@ -764,7 +764,7 @@ signature driven (`; nu: parse_literals.rs:1246 parse_path_like`; `; here: consu
 
 ### 5.8 Variables
 
-```bnf
+```ebnf
 <variable>        ::= "$" <var-name>
 <var-name>        ::= 1*<identifier-byte>
 <identifier-byte> ::= any byte except "." "[" "(" "{" "+" "-" "*" "^" "%" "/" "=" "!" "<" ">" "&" "|"
@@ -778,7 +778,7 @@ signature driven (`; nu: parse_literals.rs:1246 parse_path_like`; `; here: consu
 
 ### 5.9 `$` items
 
-```bnf
+```ebnf
 <dollar-expr>     ::= <interpolation>                    ; "$\"" or "$'" prefix
                     | "$." <cell-path-literal-body>      ; cell-path literal; "$." alone is the empty path
                     | <range>                            ; if range-shaped (5.10)
@@ -789,7 +789,7 @@ signature driven (`; nu: parse_literals.rs:1246 parse_path_like`; `; here: consu
 
 ### 5.10 Ranges
 
-```bnf
+```ebnf
 <range>           ::= [ <bound> ] [ ".." <bound> ] <range-op> [ <bound> ]
                     ; not both first and last bound absent (".." alone is `cd ..`)
 <range-op>        ::= ".." | "..<" | "..="
@@ -810,7 +810,7 @@ signature driven (`; nu: parse_literals.rs:1246 parse_path_like`; `; here: consu
 
 ### 5.11 Cell paths
 
-```bnf
+```ebnf
 <cell-path-literal-body> ::= [ <member> { <member-sep> <member> } ]     ; after "$."
 <full-cell-path>  ::= <cell-path-head> <cell-path-tail>
 <cell-path-head>  ::= <variable>
@@ -837,7 +837,7 @@ signature driven (`; nu: parse_literals.rs:1246 parse_path_like`; `; here: consu
 
 ### 5.12 Parenthesised items
 
-```bnf
+```ebnf
 <paren-expr>      ::= <range>                                  ; when range-shaped: "(1)..(3)"
                     | "(" <params> ")"                         ; shape Signature only (7.1)
                     | "(" <block-tokens> ")" <cell-path-tail>  ; subexpression; newlines
@@ -850,7 +850,7 @@ signature driven (`; nu: parse_literals.rs:1246 parse_path_like`; `; here: consu
 
 ### 5.13 Brace items: record, closure, block
 
-```bnf
+```ebnf
 <brace-expr>      ::= <record> | <closure> | <block> | <match-block> | <full-cell-path>
 ; Decided from the expected shape and the first two tokens of the body (1.4 brace probe):
 ;   body empty           : Closure -> closure; Block -> block; MatchBlock -> match block;
@@ -878,7 +878,7 @@ signature driven (`; nu: parse_literals.rs:1246 parse_path_like`; `; here: consu
 
 ### 5.14 Lists and tables
 
-```bnf
+```ebnf
 <list-or-table>   ::= <table> | <list>
 <list>            ::= "[" { <list-sep> } { <list-item> { <list-sep> } } "]"
 <list-sep>        ::= <whitespace> | "," | <eol> | "|" | <comment>
@@ -905,7 +905,7 @@ signature driven (`; nu: parse_literals.rs:1246 parse_path_like`; `; here: consu
 
 ### 5.15 Records
 
-```bnf
+```ebnf
 <record>          ::= "{" { <record-sep> } { <record-entry> { <record-sep> } } "}"
 <record-sep>      ::= <whitespace> | "," | <eol> | <comment>
 <record-entry>    ::= <record-key> ":" <record-value>
@@ -938,7 +938,7 @@ Vocabulary: `<expression>` is a `<pipeline-element>` (3.1); `<block>` is a
 
 ### 6.1 Keyword table and pipeline restrictions
 
-```bnf
+```ebnf
 <keyword-statement> ::= <def> | <extern> | <export> | <export-env> | <attribute-block>
                     | <let> | <const> | <mut> | <for> | <alias> | <module> | <use>
                     | <overlay-stmt> | <source> | <source-env> | <run> | <hide>
@@ -994,7 +994,7 @@ Vocabulary: `<expression>` is a `<pipeline-element>` (3.1); `<block>` is a
 
 ### 6.2 let, mut, const
 
-```bnf
+```ebnf
 <let>             ::= "let"   <var-decl> [ "=" <rhs-pipeline> ]
 <mut>             ::= "mut"   <var-decl>   "=" <rhs-pipeline>
 <const>           ::= "const" <var-decl>   "=" <rhs-pipeline>
@@ -1010,7 +1010,7 @@ Vocabulary: `<expression>` is a `<pipeline-element>` (3.1); `<block>` is a
 
 ### 6.3 def, extern
 
-```bnf
+```ebnf
 <def>             ::= "def" { <def-flag> } <def-name> { <def-flag> } <full-signature> <def-body>
 <def-flag>        ::= "--env" | "--wrapped"
 ; the flags are ordinary named arguments, so they parse anywhere in principle, but a
@@ -1057,7 +1057,7 @@ Vocabulary: `<expression>` is a `<pipeline-element>` (3.1); `<block>` is a
 
 ### 6.4 alias
 
-```bnf
+```ebnf
 <alias>           ::= "alias" <def-name> "=" <alias-target>
 ; `alias x=y`, `alias x`, `alias x =`, `alias = x` are errors
 <alias-target>    ::= <call> over ALL remaining items, pipes and redirections included,
@@ -1074,7 +1074,7 @@ Vocabulary: `<expression>` is a `<pipeline-element>` (3.1); `<block>` is a
 
 ### 6.5 Modules
 
-```bnf
+```ebnf
 <use>             ::= "use" <module-ref> <import-pattern-tail>        ; (7.5)
 <module-ref>      ::= <string> | "null" | <variable> | "(" <block-tokens> ")"   ; const-evaluated
 ; nu: parse_module.rs:1084 parse_use; parse_signatures.rs:20 parse_import_pattern
@@ -1128,7 +1128,7 @@ Vocabulary: `<expression>` is a `<pipeline-element>` (3.1); `<block>` is a
 
 ### 6.6 Control flow
 
-```bnf
+```ebnf
 <for>             ::= "for" <var-decl> "in" <value> <block>
 ; the iterable is ONE item of shape Any (a bare word is a string); the body is a
 ; Block (no params, no record); no flags (`--numbered` was removed); nothing may
@@ -1191,7 +1191,7 @@ Vocabulary: `<expression>` is a `<pipeline-element>` (3.1); `<block>` is a
 
 ### 6.7 Attributes
 
-```bnf
+```ebnf
 <attribute-block> ::= 1*<attribute> <annotated>
 <attribute>       ::= "@" <attr-name> <args> ( <eol> | ";" )        ; lite rules in 2
 <attr-name>       ::= <word> { " " <word> }      ; resolved as the command `attr <name>`
@@ -1210,7 +1210,7 @@ Vocabulary: `<expression>` is a `<pipeline-element>` (3.1); `<block>` is a
 
 ### 7.1 Signatures
 
-```bnf
+```ebnf
 <params>          ::= { <param-separator> } { <param> { <param-separator> } }
 ; lexed with "\n\r" as whitespace, ":" "=" "," special and in_signature, comments kept
 ; nu: parse_signatures.rs:578 parse_signature_helper
@@ -1278,7 +1278,7 @@ MultipleRestParams, reserved names `in`, `nu`, `env`, `ans` (skipped for
 
 ### 7.2 Type annotations (shapes)
 
-```bnf
+```ebnf
 <shape>           ::= "any" | "binary" | "bool" | "cell-path" | "closure" | "datetime"
                     | "directory" | "duration" | "error" | "external_arg" | "float"
                     | "filesize" | "glob" | "int" | "nothing" | "number" | "path"
@@ -1315,7 +1315,7 @@ MultipleRestParams, reserved names `in`, `nu`, `env`, `ans` (skipped for
 
 ### 7.3 Input/output types
 
-```bnf
+```ebnf
 <io-types>        ::= <io-pair> { "," <io-pair> }
                     | "[" { <io-pair> [ "," ] } "]"
 <io-pair>         ::= <shape> "->" <shape>
@@ -1328,7 +1328,7 @@ MultipleRestParams, reserved names `in`, `nu`, `env`, `ans` (skipped for
 
 ### 7.4 Variable declarations with an optional type
 
-```bnf
+```ebnf
 <var-decl>        ::= <decl-name>
                     | <decl-name> ":" <type-items>
 <type-items>      ::= <shape>
@@ -1345,7 +1345,7 @@ MultipleRestParams, reserved names `in`, `nu`, `env`, `ans` (skipped for
 
 ### 7.5 Import patterns
 
-```bnf
+```ebnf
 <import-pattern-tail> ::= { <member-name> } [ <glob> | <member-list> ]
 <member-name>     ::= <string>                ; several names form a path through submodules
 <glob>            ::= "*"                     ; only last
@@ -1361,7 +1361,7 @@ MultipleRestParams, reserved names `in`, `nu`, `env`, `ans` (skipped for
 
 ### 7.6 Match patterns
 
-```bnf
+```ebnf
 <pattern>         ::= "_"
                     | <variable-pattern>
                     | <record-pattern>
@@ -1403,7 +1403,7 @@ MultipleRestParams, reserved names `in`, `nu`, `env`, `ans` (skipped for
 
 ### 7.7 Row conditions
 
-```bnf
+```ebnf
 <row-condition>   ::= <closure>
                     | <math-expression>
 ; the whole span is first tried as a closure (`{|x| ..}`, `{ .. }`, `{}`); otherwise
@@ -1590,7 +1590,7 @@ Names used by several sections, defined once here (after the grammar so that
 `<source-file>` is the first rule, the start symbol, in the derived files). Nushell source is bytes;
 "byte" means one byte of UTF-8.
 
-```bnf
+```ebnf
 <digit>           ::= "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
 <ascii-digit>     ::= <digit>
 <ascii-letter>    ::= <a byte in "A".."Z" or "a".."z">
