@@ -8,32 +8,32 @@ use crate::span::Span;
 
 /// Render the AST as an indented tree, one node per line, with spans.
 pub fn dump(ast: &Ast<'_>) -> String {
-    let mut p = Printer { src: ast.source, out: String::new(), depth: 0 };
-    p.block("Block", &ast.block);
+    let mut printer = Printer { src: ast.source, out: String::new(), depth: 0 };
+    printer.block("Block", &ast.block);
     if !ast.comments.is_empty() {
-        p.line(format_args!("Comments ({})", ast.comments.len()));
-        p.depth += 1;
-        for c in &ast.comments {
-            p.line(format_args!("{} {:?}", c.span, c.text(ast.source)));
+        printer.line(format_args!("Comments ({})", ast.comments.len()));
+        printer.depth += 1;
+        for comment in &ast.comments {
+            printer.line(format_args!("{} {:?}", comment.span, comment.text(ast.source)));
         }
-        p.depth -= 1;
+        printer.depth -= 1;
     }
     if !ast.ignored.is_empty() {
-        p.line(format_args!("Ignored ({})", ast.ignored.len()));
-        p.depth += 1;
-        for s in &ast.ignored {
-            p.line(format_args!("{s} {:?}", s.slice(ast.source)));
+        printer.line(format_args!("Ignored ({})", ast.ignored.len()));
+        printer.depth += 1;
+        for span in &ast.ignored {
+            printer.line(format_args!("{span} {:?}", span.slice(ast.source)));
         }
-        p.depth -= 1;
+        printer.depth -= 1;
     }
-    p.out
+    printer.out
 }
 
 /// Render a single expression as an indented tree.
-pub fn dump_expr(source: &str, expr: &Expr<'_>) -> String {
-    let mut p = Printer { src: source, out: String::new(), depth: 0 };
-    p.expr(expr);
-    p.out
+pub fn dump_expression(source: &str, expr: &Expression<'_>) -> String {
+    let mut printer = Printer { src: source, out: String::new(), depth: 0 };
+    printer.expr(expr);
+    printer.out
 }
 
 struct Printer<'a> {
@@ -55,17 +55,17 @@ impl<'a> Printer<'a> {
         span.slice(self.src)
     }
 
-    fn nested(&mut self, f: impl FnOnce(&mut Self)) {
+    fn nested(&mut self, print: impl FnOnce(&mut Self)) {
         self.depth += 1;
-        f(self);
+        print(self);
         self.depth -= 1;
     }
 
     fn block(&mut self, label: &str, block: &Block<'a>) {
         self.line(format_args!("{label} {}", block.span));
-        self.nested(|p| {
+        self.nested(|printer| {
             for pipeline in &block.pipelines {
-                p.pipeline(pipeline);
+                printer.pipeline(pipeline);
             }
         });
     }
@@ -76,34 +76,34 @@ impl<'a> Printer<'a> {
         if comments > 0 {
             let _ = write!(extra, " comments={comments}");
         }
-        if let Some(t) = pipeline.terminator {
-            let _ = write!(extra, " terminator={t}");
+        if let Some(terminator) = pipeline.terminator {
+            let _ = write!(extra, " terminator={terminator}");
         }
         self.line(format_args!("Pipeline {}{extra}", pipeline.span));
-        self.nested(|p| {
+        self.nested(|printer| {
             for element in &pipeline.elements {
                 if let Some(pipe) = element.pipe {
-                    p.line(format_args!("| {pipe}"));
+                    printer.line(format_args!("| {pipe}"));
                 }
-                p.expr(&element.expr);
-                if let Some(r) = &element.redirection {
-                    p.redirection(r);
+                printer.expr(&element.expr);
+                if let Some(redirection) = &element.redirection {
+                    printer.redirection(redirection);
                 }
             }
         });
     }
 
-    fn redirection(&mut self, r: &Redirection<'a>) {
-        let target = |p: &mut Self, t: &RedirectTarget<'a>| match t {
-            RedirectTarget::File { op, path, .. } => {
-                p.line(format_args!("Redirect {:?} {}", op.item, op.span));
-                p.nested(|p| p.expr(path));
+    fn redirection(&mut self, r: &PipelineRedirection<'a>) {
+        let target = |printer: &mut Self, t: &RedirectionTarget<'a>| match t {
+            RedirectionTarget::File { op, path, .. } => {
+                printer.line(format_args!("Redirect {:?} {}", op.item, op.span));
+                printer.nested(|printer| printer.expr(path));
             }
-            RedirectTarget::Pipe { op } => p.line(format_args!("Redirect {:?} {}", op.item, op.span)),
+            RedirectionTarget::Pipe { op } => printer.line(format_args!("Redirect {:?} {}", op.item, op.span)),
         };
         match r {
-            Redirection::Single { target: t, .. } => target(self, t),
-            Redirection::Separate { out, err } => {
+            PipelineRedirection::Single { target: t, .. } => target(self, t),
+            PipelineRedirection::Separate { out, err } => {
                 target(self, out);
                 target(self, err);
             }
@@ -112,429 +112,444 @@ impl<'a> Printer<'a> {
 
     fn signature(&mut self, sig: &Signature<'a>) {
         self.line(format_args!("Signature {}", sig.span));
-        self.nested(|p| {
+        self.nested(|printer| {
             for param in &sig.params {
                 let kind = match &param.kind {
-                    ParamKind::Positional { optional: false } => "positional".to_string(),
-                    ParamKind::Positional { optional: true } => "optional".to_string(),
-                    ParamKind::Rest => "rest".to_string(),
-                    ParamKind::Flag { long, short } => format!(
+                    ParameterKind::Required => "positional".to_string(),
+                    ParameterKind::Optional => "optional".to_string(),
+                    ParameterKind::Rest => "rest".to_string(),
+                    ParameterKind::Flag { long, short } => format!(
                         "flag{}{}",
                         long.map(|l| format!(" --{}", l.item)).unwrap_or_default(),
-                        short.map(|s| format!(" -{}", s.item)).unwrap_or_default()
+                        short.map(|short| format!(" -{}", short.item)).unwrap_or_default()
                     ),
                 };
                 let mut extra = String::new();
                 if let Some(ty) = &param.ty {
-                    let _ = write!(extra, " : {}", p.text(ty.span));
+                    let _ = write!(extra, " : {}", printer.text(ty.span));
                 }
-                if let Some(c) = param.completer {
-                    let _ = write!(extra, " @{}", c.item);
+                if let Some(completer) = param.completer {
+                    let _ = write!(extra, " @{}", completer.item);
                 }
                 if !param.description.is_empty() {
-                    let desc: Vec<&str> = param.description.iter().map(|d| d.body(p.src)).collect();
+                    let desc: Vec<&str> = param.description.iter().map(|comment| comment.body(printer.src)).collect();
                     let _ = write!(extra, " desc={:?}", desc.join("\n"));
                 }
-                p.line(format_args!("Param {kind} `{}` {}{extra}", param.name.item, param.span));
-                if let Some(d) = &param.default {
-                    p.nested(|p| {
-                        p.line(format_args!("Default"));
-                        p.nested(|p| p.expr(d));
+                printer.line(format_args!("Param {kind} `{}` {}{extra}", param.name.item, param.span));
+                if let Some(default) = &param.default {
+                    printer.nested(|printer| {
+                        printer.line(format_args!("Default"));
+                        printer.nested(|printer| printer.expr(default));
                     });
                 }
             }
-            for io in &sig.io_types {
-                p.line(format_args!("IoType {} -> {}", p.text(io.input.span), p.text(io.output.span)));
+            for io in &sig.input_output_types {
+                printer.line(format_args!(
+                    "IoType {} -> {}",
+                    printer.text(io.input.span),
+                    printer.text(io.output.span)
+                ));
             }
         });
     }
 
-    fn args(&mut self, args: &[Arg<'a>]) {
+    fn args(&mut self, args: &[Argument<'a>]) {
         for arg in args {
             match arg {
-                Arg::Positional(e) => self.expr(e),
-                Arg::Flag(f) => {
-                    let dashes = if f.long { "--" } else { "-" };
-                    self.line(format_args!("Flag {dashes}{} {}", f.name, f.span));
-                    if let Some(v) = &f.value {
-                        self.nested(|p| p.expr(v));
+                Argument::Positional(expr) => self.expr(expr),
+                Argument::Named(flag) => {
+                    let dashes = if flag.long { "--" } else { "-" };
+                    self.line(format_args!("Flag {dashes}{} {}", flag.name, flag.span));
+                    if let Some(value) = &flag.value {
+                        self.nested(|printer| printer.expr(value));
                     }
                 }
-                Arg::Spread { dots, expr } => {
+                Argument::Spread { dots, expr } => {
                     self.line(format_args!("Spread {dots}"));
-                    self.nested(|p| p.expr(expr));
+                    self.nested(|printer| printer.expr(expr));
                 }
-                Arg::EndOfOptions(s) => self.line(format_args!("EndOfOptions {s}")),
+                Argument::EndOfOptions(span) => self.line(format_args!("EndOfOptions {span}")),
             }
         }
     }
 
     fn members(&mut self, members: &[PathMember<'a>]) {
-        for m in members {
-            let name = match &m.kind {
-                PathMemberKind::Int(i) => i.to_string(),
-                PathMemberKind::String(s) => format!("{s:?}"),
+        for member in members {
+            let name = match &member.kind {
+                PathMemberKind::Int(int) => int.to_string(),
+                PathMemberKind::String(string) => format!("{string:?}"),
             };
-            let opt = if m.optional { "?" } else { "" };
-            let ins = if m.insensitive { "!" } else { "" };
-            self.line(format_args!("Member {name}{opt}{ins} {}", m.span));
+            let opt = if member.optional { "?" } else { "" };
+            let ins = if member.case_insensitive { "!" } else { "" };
+            self.line(format_args!("Member {name}{opt}{ins} {}", member.span));
         }
     }
 
-    fn pattern(&mut self, pat: &Pattern<'a>) {
-        match &pat.kind {
-            PatternKind::Value(e) => {
+    fn pattern(&mut self, pat: &MatchPattern<'a>) {
+        match &pat.pattern {
+            Pattern::Expression(expr) => {
                 self.line(format_args!("Pattern value {}", pat.span));
-                self.nested(|p| p.expr(e));
+                self.nested(|printer| printer.expr(expr));
             }
-            PatternKind::Variable(v) => self.line(format_args!("Pattern ${v} {}", pat.span)),
-            PatternKind::Wildcard => self.line(format_args!("Pattern _ {}", pat.span)),
-            PatternKind::List(items) => {
+            Pattern::Variable(variable) => self.line(format_args!("Pattern ${variable} {}", pat.span)),
+            Pattern::IgnoreValue => self.line(format_args!("Pattern _ {}", pat.span)),
+            Pattern::List(items) => {
                 self.line(format_args!("Pattern list {}", pat.span));
-                self.nested(|p| {
-                    for i in items {
-                        p.pattern(i);
+                self.nested(|printer| {
+                    for item in items {
+                        printer.pattern(item);
                     }
                 });
             }
-            PatternKind::Record(fields) => {
+            Pattern::Record(fields) => {
                 self.line(format_args!("Pattern record {}", pat.span));
-                self.nested(|p| {
+                self.nested(|printer| {
                     for (name, pattern) in fields {
-                        p.line(format_args!("Field {:?}", name.item));
-                        p.nested(|p| p.pattern(pattern));
+                        printer.line(format_args!("Field {:?}", name.item));
+                        printer.nested(|printer| printer.pattern(pattern));
                     }
                 });
             }
-            PatternKind::Rest(name) => {
-                self.line(format_args!(
-                    "Pattern rest {} {}",
-                    name.map(|n| format!("${}", n.item)).unwrap_or_default(),
-                    pat.span
-                ));
-            }
-            PatternKind::Or(alts) => {
+            Pattern::Rest(name) => self.line(format_args!("Pattern rest ${} {}", name.item, pat.span)),
+            Pattern::IgnoreRest => self.line(format_args!("Pattern rest  {}", pat.span)),
+            Pattern::Or(alts) => {
                 self.line(format_args!("Pattern or {}", pat.span));
-                self.nested(|p| {
+                self.nested(|printer| {
                     for a in alts {
-                        p.pattern(a);
+                        printer.pattern(a);
                     }
                 });
             }
         }
     }
 
-    fn expr(&mut self, e: &Expr<'a>) {
-        let span = e.span;
-        match &e.kind {
-            ExprKind::Bool(b) => self.line(format_args!("Bool {b} {span}")),
-            ExprKind::Nothing => self.line(format_args!("Nothing {span}")),
-            ExprKind::Int(i) => self.line(format_args!("Int {i} {span}")),
-            ExprKind::Float(f) => self.line(format_args!("Float {f} {span}")),
-            ExprKind::String(s) => self.line(format_args!("String {:?} {:?} {span}", s.quote, s.value)),
-            ExprKind::Interpolation(i) => {
-                self.line(format_args!("Interpolation {:?} {span}", i.quote));
-                self.nested(|p| {
-                    for part in &i.parts {
+    fn expr(&mut self, expression: &Expression<'a>) {
+        let span = expression.span;
+        match &expression.expr {
+            Expr::Bool(value) => self.line(format_args!("Bool {value} {span}")),
+            Expr::Nothing => self.line(format_args!("Nothing {span}")),
+            Expr::Int(int) => self.line(format_args!("Int {int} {span}")),
+            Expr::Float(float) => self.line(format_args!("Float {float} {span}")),
+            Expr::String(string) => self.line(format_args!("String {:?} {:?} {span}", string.quote, string.value)),
+            Expr::StringInterpolation(interpolation) => {
+                self.line(format_args!("Interpolation {:?} {span}", interpolation.quote));
+                self.nested(|printer| {
+                    for part in &interpolation.parts {
                         match part {
-                            InterpPart::Text { span, value } => p.line(format_args!("Text {value:?} {span}")),
-                            InterpPart::Expr(e) => p.expr(e),
+                            InterpolationPart::Text { span, value } => {
+                                printer.line(format_args!("Text {value:?} {span}"))
+                            }
+                            InterpolationPart::Expression(expr) => printer.expr(expr),
                         }
                     }
                 });
             }
-            ExprKind::Binary(b) => self.line(format_args!("Binary radix={} {:?} {span}", b.radix, b.bytes)),
-            ExprKind::Duration(d) => self.line(format_args!("Duration {} {} {span}", d.value, d.unit.as_str())),
-            ExprKind::Filesize(f) => self.line(format_args!("Filesize {} {} {span}", f.value, f.unit.as_str())),
-            ExprKind::DateTime(t) => self.line(format_args!("DateTime {t} {span}")),
-            ExprKind::Range(r) => {
-                self.line(format_args!("Range {:?} {span}", r.inclusion));
-                self.nested(|p| {
-                    if let Some(f) = &r.from {
-                        p.line(format_args!("From"));
-                        p.nested(|p| p.expr(f));
+            Expr::Binary(binary) => self.line(format_args!("Binary radix={} {:?} {span}", binary.radix, binary.bytes)),
+            Expr::Duration(duration) => {
+                self.line(format_args!("Duration {} {} {span}", duration.value, duration.unit.as_str()))
+            }
+            Expr::Filesize(filesize) => {
+                self.line(format_args!("Filesize {} {} {span}", filesize.value, filesize.unit.as_str()))
+            }
+            Expr::DateTime(datetime) => self.line(format_args!("DateTime {datetime} {span}")),
+            Expr::Range(range) => {
+                self.line(format_args!("Range {:?} {span}", range.operator.inclusion));
+                self.nested(|printer| {
+                    if let Some(from) = &range.from {
+                        printer.line(format_args!("From"));
+                        printer.nested(|printer| printer.expr(from));
                     }
-                    if let Some(n) = &r.next {
-                        p.line(format_args!("Next"));
-                        p.nested(|p| p.expr(n));
+                    if let Some(next) = &range.next {
+                        printer.line(format_args!("Next"));
+                        printer.nested(|printer| printer.expr(next));
                     }
-                    if let Some(t) = &r.to {
-                        p.line(format_args!("To"));
-                        p.nested(|p| p.expr(t));
+                    if let Some(to) = &range.to {
+                        printer.line(format_args!("To"));
+                        printer.nested(|printer| printer.expr(to));
                     }
                 });
             }
-            ExprKind::Var(v) => self.line(format_args!("Var ${} {span}", v.name)),
-            ExprKind::CellPath(c) => {
+            Expr::Var(variable) => self.line(format_args!("Var ${} {span}", variable.name)),
+            Expr::CellPath(cell_path) => {
                 self.line(format_args!("CellPath {span}"));
-                self.nested(|p| p.members(&c.members));
+                self.nested(|printer| printer.members(&cell_path.members));
             }
-            ExprKind::FullCellPath(f) => {
-                let implicit = if f.implicit_head { " implicit-head" } else { "" };
+            Expr::FullCellPath(full_cell_path) => {
+                let implicit = if full_cell_path.implicit_head { " implicit-head" } else { "" };
                 self.line(format_args!("FullCellPath{implicit} {span}"));
-                self.nested(|p| {
-                    p.expr(&f.head);
-                    p.members(&f.members);
+                self.nested(|printer| {
+                    printer.expr(&full_cell_path.head);
+                    printer.members(&full_cell_path.tail);
                 });
             }
-            ExprKind::List(items) => {
+            Expr::List(items) => {
                 self.line(format_args!("List {span}"));
-                self.nested(|p| {
+                self.nested(|printer| {
                     for item in items {
                         match item {
-                            ListItem::Item(e) => p.expr(e),
+                            ListItem::Item(expr) => printer.expr(expr),
                             ListItem::Spread { dots, expr } => {
-                                p.line(format_args!("Spread {dots}"));
-                                p.nested(|p| p.expr(expr));
+                                printer.line(format_args!("Spread {dots}"));
+                                printer.nested(|printer| printer.expr(expr));
                             }
                         }
                     }
                 });
             }
-            ExprKind::Table(t) => {
+            Expr::Table(table) => {
                 self.line(format_args!("Table {span}"));
-                self.nested(|p| {
-                    p.line(format_args!("Columns"));
-                    p.nested(|p| p.expr(&t.columns));
-                    for row in &t.rows {
-                        p.line(format_args!("Row"));
-                        p.nested(|p| p.expr(row));
+                self.nested(|printer| {
+                    printer.line(format_args!("Columns"));
+                    printer.nested(|printer| printer.expr(&table.columns));
+                    for row in &table.rows {
+                        printer.line(format_args!("Row"));
+                        printer.nested(|printer| printer.expr(row));
                     }
                 });
             }
-            ExprKind::Record(items) => {
+            Expr::Record(items) => {
                 self.line(format_args!("Record {span}"));
-                self.nested(|p| {
+                self.nested(|printer| {
                     for item in items {
                         match item {
                             RecordItem::Pair { key, value, .. } => {
-                                p.line(format_args!("Pair"));
-                                p.nested(|p| {
-                                    p.expr(key);
-                                    p.expr(value);
+                                printer.line(format_args!("Pair"));
+                                printer.nested(|printer| {
+                                    printer.expr(key);
+                                    printer.expr(value);
                                 });
                             }
                             RecordItem::Spread { dots, expr } => {
-                                p.line(format_args!("Spread {dots}"));
-                                p.nested(|p| p.expr(expr));
+                                printer.line(format_args!("Spread {dots}"));
+                                printer.nested(|printer| printer.expr(expr));
                             }
                         }
                     }
                 });
             }
-            ExprKind::Closure(c) => {
+            Expr::Closure(closure) => {
                 self.line(format_args!("Closure {span}"));
-                self.nested(|p| {
-                    if let Some(sig) = &c.params {
-                        p.signature(sig);
+                self.nested(|printer| {
+                    if let Some(sig) = &closure.params {
+                        printer.signature(sig);
                     }
-                    p.block("Body", &c.body);
+                    printer.block("Body", &closure.body);
                 });
             }
-            ExprKind::Block(b) => self.block(&format!("BlockExpr {span}"), b),
-            ExprKind::Subexpression(b) => self.block(&format!("Subexpression {span}"), b),
-            ExprKind::BinaryOp(b) => {
-                self.line(format_args!("BinaryOp {} {span}", b.op.item));
-                self.nested(|p| {
-                    p.expr(&b.lhs);
-                    p.expr(&b.rhs);
+            Expr::Block(block) => self.block(&format!("BlockExpr {span}"), block),
+            Expr::Subexpression(block) => self.block(&format!("Subexpression {span}"), block),
+            Expr::BinaryOp(binary) => {
+                self.line(format_args!("BinaryOp {} {span}", binary.op.item));
+                self.nested(|printer| {
+                    printer.expr(&binary.lhs);
+                    printer.expr(&binary.rhs);
                 });
             }
-            ExprKind::UnaryNot(n) => {
+            Expr::UnaryNot(not) => {
                 self.line(format_args!("Not {span}"));
-                self.nested(|p| p.expr(&n.expr));
+                self.nested(|printer| printer.expr(&not.expr));
             }
-            ExprKind::Assignment(a) => {
-                self.line(format_args!("Assignment {} {span}", a.op.item.as_str()));
-                self.nested(|p| {
-                    p.expr(&a.lhs);
-                    p.block("Value", &a.rhs);
+            Expr::Assignment(assignment) => {
+                self.line(format_args!("Assignment {} {span}", assignment.op.item.as_str()));
+                self.nested(|printer| {
+                    printer.expr(&assignment.lhs);
+                    printer.block("Value", &assignment.rhs);
                 });
             }
-            ExprKind::Call(c) => {
-                let sigil = if c.sigil.is_some() { "%" } else { "" };
-                self.line(format_args!("Call `{sigil}{}` {span}", c.head.name));
-                self.nested(|p| p.args(&c.args));
+            Expr::Call(call) => {
+                let sigil = if call.sigil.is_some() { "%" } else { "" };
+                self.line(format_args!("Call `{sigil}{}` {span}", call.head.name));
+                self.nested(|printer| printer.args(&call.arguments));
             }
-            ExprKind::DynamicCall(d) => {
+            Expr::DynamicCall(dynamic_call) => {
                 self.line(format_args!("DynamicCall {span}"));
-                self.nested(|p| {
-                    p.expr(&d.head);
-                    p.args(&d.args);
+                self.nested(|printer| {
+                    printer.expr(&dynamic_call.head);
+                    printer.args(&dynamic_call.arguments);
                 });
             }
-            ExprKind::ExternalCall(c) => {
+            Expr::ExternalCall(external_call) => {
                 self.line(format_args!("ExternalCall {span}"));
-                self.nested(|p| {
-                    p.expr(&c.head);
-                    for arg in &c.args {
+                self.nested(|printer| {
+                    printer.expr(&external_call.head);
+                    for arg in &external_call.arguments {
                         match arg {
-                            ExternalArg::Regular(e) => p.expr(e),
-                            ExternalArg::Spread { dots, expr } => {
-                                p.line(format_args!("Spread {dots}"));
-                                p.nested(|p| p.expr(expr));
+                            ExternalArgument::Regular(expr) => printer.expr(expr),
+                            ExternalArgument::Spread { dots, expr } => {
+                                printer.line(format_args!("Spread {dots}"));
+                                printer.nested(|printer| printer.expr(expr));
                             }
                         }
                     }
                 });
             }
-            ExprKind::EnvShorthand(e) => {
+            Expr::EnvShorthand(env_shorthand) => {
                 self.line(format_args!("EnvShorthand {span}"));
-                self.nested(|p| {
-                    for v in &e.vars {
-                        p.line(format_args!("Env {} {}", v.name.item, v.span));
-                        p.nested(|p| p.expr(&v.value));
+                self.nested(|printer| {
+                    for assignment in &env_shorthand.vars {
+                        printer.line(format_args!("Env {} {}", assignment.name.item, assignment.span));
+                        printer.nested(|printer| printer.expr(&assignment.value));
                     }
-                    p.expr(&e.expr);
+                    printer.expr(&env_shorthand.expr);
                 });
             }
-            ExprKind::AttributeBlock(a) => {
+            Expr::AttributeBlock(attribute_block) => {
                 self.line(format_args!("AttributeBlock {span}"));
-                self.nested(|p| {
-                    for attr in &a.attributes {
-                        p.line(format_args!("Attribute `{}` {}", attr.name.item, attr.span));
-                        p.nested(|p| p.args(&attr.args));
+                self.nested(|printer| {
+                    for attr in &attribute_block.attributes {
+                        printer.line(format_args!("Attribute `{}` {}", attr.name.item, attr.span));
+                        printer.nested(|printer| printer.args(&attr.arguments));
                     }
-                    p.expr(&a.item);
+                    printer.expr(&attribute_block.item);
                 });
             }
-            ExprKind::Let(b) | ExprKind::Mut(b) | ExprKind::Const(b) => {
-                let kw = e.kind.keyword().unwrap_or("let");
-                let ty = b.ty.as_ref().map(|t| format!(" : {}", self.text(t.span))).unwrap_or_default();
-                self.line(format_args!("{kw} {}{ty} {span}", b.name.item));
-                if let Some(value) = &b.value {
-                    self.nested(|p| p.block("Value", value));
+            Expr::Let(binding) | Expr::Mut(binding) | Expr::Const(binding) => {
+                let keyword = expression.expr.keyword().unwrap_or("let");
+                let ty = binding
+                    .ty
+                    .as_ref()
+                    .map(|annotation| format!(" : {}", self.text(annotation.span)))
+                    .unwrap_or_default();
+                self.line(format_args!("{keyword} {}{ty} {span}", binding.name.item));
+                if let Some(value) = &binding.value {
+                    self.nested(|printer| printer.block("Value", value));
                 }
             }
-            ExprKind::Def(d) => {
-                let flags: Vec<_> = d.flags.iter().map(|f| format!("{:?}", f.item)).collect();
+            Expr::Def(def) => {
+                let flags: Vec<_> = def.flags.iter().map(|flag| format!("{:?}", flag.item)).collect();
                 let flags = if flags.is_empty() { String::new() } else { format!(" [{}]", flags.join(", ")) };
-                self.line(format_args!("Def `{}`{flags} {span}", d.name.item));
-                self.nested(|p| {
-                    p.signature(&d.signature);
-                    if let Some(params) = &d.body_params {
-                        p.line(format_args!("BodyParams"));
-                        p.nested(|p| p.signature(params));
+                self.line(format_args!("Def `{}`{flags} {span}", def.name.item));
+                self.nested(|printer| {
+                    printer.signature(&def.signature);
+                    if let Some(params) = &def.body_params {
+                        printer.line(format_args!("BodyParams"));
+                        printer.nested(|printer| printer.signature(params));
                     }
-                    p.block("Body", &d.body);
+                    printer.block("Body", &def.body);
                 });
             }
-            ExprKind::Extern(x) => {
-                self.line(format_args!("Extern `{}` {span}", x.name.item));
-                self.nested(|p| p.signature(&x.signature));
+            Expr::Extern(extern_declaration) => {
+                self.line(format_args!("Extern `{}` {span}", extern_declaration.name.item));
+                self.nested(|printer| printer.signature(&extern_declaration.signature));
             }
-            ExprKind::Alias(a) => {
-                self.line(format_args!("Alias `{}` {span}", a.name.item));
-                if let Some(value) = &a.value {
-                    self.nested(|p| p.expr(value));
+            Expr::Alias(alias) => {
+                self.line(format_args!("Alias `{}` {span}", alias.name.item));
+                if let Some(value) = &alias.value {
+                    self.nested(|printer| printer.expr(value));
                 }
             }
-            ExprKind::Use(u) => {
+            Expr::Use(use_statement) => {
                 self.line(format_args!("Use {span}"));
-                self.nested(|p| {
-                    p.expr(&u.module);
-                    for m in &u.members {
-                        match &m.kind {
-                            UseMemberKind::Name(n) => p.line(format_args!("Member {n:?} {}", m.span)),
-                            UseMemberKind::Glob => p.line(format_args!("Member * {}", m.span)),
-                            UseMemberKind::List(names) => {
-                                let names: Vec<_> = names.iter().map(|n| n.item.as_ref()).collect();
-                                p.line(format_args!("Members {names:?} {}", m.span));
+                self.nested(|printer| {
+                    printer.expr(&use_statement.module);
+                    for member in &use_statement.members {
+                        match &member.kind {
+                            ImportPatternMemberKind::Name(name) => {
+                                printer.line(format_args!("Member {name:?} {}", member.span))
                             }
-                            UseMemberKind::Ignored(e) => {
-                                p.line(format_args!("Member (ignored) {}", m.span));
-                                p.nested(|p| p.expr(e));
+                            ImportPatternMemberKind::Glob => printer.line(format_args!("Member * {}", member.span)),
+                            ImportPatternMemberKind::List(names) => {
+                                let names: Vec<_> = names.iter().map(|n| n.item.as_ref()).collect();
+                                printer.line(format_args!("Members {names:?} {}", member.span));
+                            }
+                            ImportPatternMemberKind::Ignored(ignored) => {
+                                printer.line(format_args!("Member (ignored) {}", member.span));
+                                printer.nested(|printer| printer.expr(ignored));
                             }
                         }
                     }
                 });
             }
-            ExprKind::Module(m) => {
+            Expr::Module(module) => {
                 self.line(format_args!("Module {span}"));
-                self.nested(|p| {
-                    p.expr(&m.name);
-                    if let Some(b) = &m.body {
-                        p.block("Body", b);
+                self.nested(|printer| {
+                    printer.expr(&module.name);
+                    if let Some(body) = &module.body {
+                        printer.block("Body", body);
                     }
                 });
             }
-            ExprKind::Export(x) => {
+            Expr::Export(export) => {
                 self.line(format_args!("Export {span}"));
-                self.nested(|p| p.expr(&x.item));
+                self.nested(|printer| printer.expr(&export.item));
             }
-            ExprKind::ExportEnv(x) => self.block(&format!("ExportEnv {span}"), &x.body),
-            ExprKind::If(i) => {
+            Expr::ExportEnv(export_env) => self.block(&format!("ExportEnv {span}"), &export_env.body),
+            Expr::If(if_expression) => {
                 self.line(format_args!("If {span}"));
-                self.nested(|p| {
-                    p.line(format_args!("Condition"));
-                    p.nested(|p| p.expr(&i.condition));
-                    p.block("Then", &i.then_block);
-                    if let Some(e) = &i.else_branch {
-                        p.line(format_args!("Else {}", e.keyword));
-                        p.nested(|p| p.expr(&e.body));
+                self.nested(|printer| {
+                    printer.line(format_args!("Condition"));
+                    printer.nested(|printer| printer.expr(&if_expression.condition));
+                    printer.block("Then", &if_expression.then_block);
+                    if let Some(else_branch) = &if_expression.else_branch {
+                        printer.line(format_args!("Else {}", else_branch.keyword));
+                        printer.nested(|printer| printer.expr(&else_branch.body));
                     }
                 });
             }
-            ExprKind::Match(m) => {
+            Expr::Match(match_expression) => {
                 self.line(format_args!("Match {span}"));
-                self.nested(|p| {
-                    p.expr(&m.value);
-                    for arm in &m.arms {
-                        p.line(format_args!("Arm {}", arm.span));
-                        p.nested(|p| {
-                            p.pattern(&arm.pattern);
-                            if let Some(g) = &arm.guard {
-                                p.line(format_args!("Guard"));
-                                p.nested(|p| p.expr(g));
+                self.nested(|printer| {
+                    printer.expr(&match_expression.value);
+                    for arm in &match_expression.arms {
+                        printer.line(format_args!("Arm {}", arm.span));
+                        printer.nested(|printer| {
+                            printer.pattern(&arm.pattern);
+                            if let Some(guard) = &arm.guard {
+                                printer.line(format_args!("Guard"));
+                                printer.nested(|printer| printer.expr(guard));
                             }
-                            p.expr(&arm.body);
+                            printer.expr(&arm.body);
                         });
                     }
-                    if let Some(b) = &m.value_block {
-                        p.line(format_args!("ValueBlock"));
-                        p.nested(|p| p.expr(b));
+                    if let Some(value_block) = &match_expression.value_block {
+                        printer.line(format_args!("ValueBlock"));
+                        printer.nested(|printer| printer.expr(value_block));
                     }
                 });
             }
-            ExprKind::For(f) => {
-                let ty = f.ty.as_ref().map(|t| format!(" : {}", self.text(t.span))).unwrap_or_default();
-                self.line(format_args!("For ${}{ty} {span}", f.var.item));
-                self.nested(|p| {
-                    p.expr(&f.iterable);
-                    p.block("Body", &f.body);
+            Expr::For(for_loop) => {
+                let ty = for_loop
+                    .ty
+                    .as_ref()
+                    .map(|annotation| format!(" : {}", self.text(annotation.span)))
+                    .unwrap_or_default();
+                self.line(format_args!("For ${}{ty} {span}", for_loop.var.item));
+                self.nested(|printer| {
+                    printer.expr(&for_loop.iterable);
+                    printer.block("Body", &for_loop.body);
                 });
             }
-            ExprKind::While(w) => {
+            Expr::While(while_loop) => {
                 self.line(format_args!("While {span}"));
-                self.nested(|p| {
-                    p.expr(&w.condition);
-                    p.block("Body", &w.body);
+                self.nested(|printer| {
+                    printer.expr(&while_loop.condition);
+                    printer.block("Body", &while_loop.body);
                 });
             }
-            ExprKind::Loop(l) => self.block(&format!("Loop {span}"), &l.body),
-            ExprKind::Break => self.line(format_args!("Break {span}")),
-            ExprKind::Continue => self.line(format_args!("Continue {span}")),
-            ExprKind::Return(r) => {
+            Expr::Loop(loop_expression) => self.block(&format!("Loop {span}"), &loop_expression.body),
+            Expr::Break => self.line(format_args!("Break {span}")),
+            Expr::Continue => self.line(format_args!("Continue {span}")),
+            Expr::Return(return_expression) => {
                 self.line(format_args!("Return {span}"));
-                if let Some(v) = &r.value {
-                    self.nested(|p| p.expr(v));
+                if let Some(value) = &return_expression.value {
+                    self.nested(|printer| printer.expr(value));
                 }
             }
-            ExprKind::Try(t) => {
+            Expr::Try(try_expression) => {
                 self.line(format_args!("Try {span}"));
-                self.nested(|p| {
-                    p.block("Body", &t.body);
-                    for h in &t.handlers {
-                        p.line(format_args!("{:?} {}", h.kind, h.keyword));
-                        p.nested(|p| p.expr(&h.body));
+                self.nested(|printer| {
+                    printer.block("Body", &try_expression.body);
+                    for handler in &try_expression.handlers {
+                        printer.line(format_args!("{:?} {}", handler.kind, handler.keyword));
+                        printer.nested(|printer| printer.expr(&handler.body));
                     }
                 });
             }
-            ExprKind::Where(w) => {
+            Expr::Where(where_expression) => {
                 self.line(format_args!("Where {span}"));
-                self.nested(|p| p.expr(&w.condition));
+                self.nested(|printer| printer.expr(&where_expression.condition));
             }
-            ExprKind::Garbage => self.line(format_args!("Garbage {span}")),
+            Expr::Garbage => self.line(format_args!("Garbage {span}")),
         }
     }
 }

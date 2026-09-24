@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use nu_winnow_parser::ast::{ExprKind, Visitor, walk_expr};
+use nu_winnow_parser::ast::{Expr, Visitor, walk_expression};
 use nu_winnow_parser::{ParseConfig, parse_lenient};
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -29,12 +29,12 @@ struct Counter {
 }
 
 impl<'a> Visitor<'a> for Counter {
-    fn visit_expr(&mut self, expr: &nu_winnow_parser::ast::Expr<'a>) {
+    fn visit_expression(&mut self, expr: &nu_winnow_parser::ast::Expression<'a>) {
         self.exprs += 1;
-        if matches!(expr.kind, ExprKind::Garbage) {
+        if matches!(expr.expr, Expr::Garbage) {
             self.garbage += 1;
         }
-        walk_expr(self, expr);
+        walk_expression(self, expr);
     }
 }
 

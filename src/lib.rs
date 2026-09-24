@@ -5,12 +5,12 @@
 //! for formatters (such as `nufmt`), linters, language servers and evaluators.
 //!
 //! ```
-//! use nu_winnow_parser::{parse, ast::ExprKind};
+//! use nu_winnow_parser::{parse, ast::Expr};
 //!
 //! let ast = parse("ls | where size > 1kb | get name").unwrap();
 //! let pipeline = &ast.block.pipelines[0];
 //! assert_eq!(pipeline.elements.len(), 3);
-//! assert!(matches!(pipeline.elements[1].expr.kind, ExprKind::Where(_)));
+//! assert!(matches!(pipeline.elements[1].expr.expr, Expr::Where(_)));
 //! ```
 //!
 //! See [`ast`] for the tree, [`parse_lenient`] for error recovery,
@@ -27,7 +27,7 @@ pub mod docs;
 pub mod error;
 pub mod flatten;
 pub mod input;
-pub mod lexer;
+pub mod lex;
 mod parser;
 pub mod pretty;
 pub mod span;
@@ -48,15 +48,15 @@ pub fn parse(source: &str) -> Result<Ast<'_>, ParseError> {
 
 /// Parse with an explicit configuration.
 pub fn parse_with<'a>(source: &'a str, config: &ParseConfig) -> Result<Ast<'a>, ParseError> {
-    let (ast, diagnostics) = parser::parse_source(source, config);
+    let (ast, diagnostics) = parser::parse(source, config);
     if diagnostics.is_empty() { Ok(ast) } else { Err(ParseError::new(diagnostics)) }
 }
 
 /// Parse with error recovery: statements that fail to parse become
-/// [`ast::ExprKind::Garbage`] nodes and parsing continues on the next line.
+/// [`ast::Expr::Garbage`] nodes and parsing continues on the next line.
 ///
 /// Returns the (possibly partial) AST together with every diagnostic, in
 /// source order. The diagnostics are empty exactly when [`parse`] would succeed.
 pub fn parse_lenient<'a>(source: &'a str, config: &ParseConfig) -> (Ast<'a>, Vec<Diagnostic>) {
-    parser::parse_source(source, config)
+    parser::parse(source, config)
 }

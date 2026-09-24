@@ -8,18 +8,20 @@ repository root.
 
 ## Unit tests inside modules
 
-`src/lexer.rs`, `src/parser/literal.rs`, `src/flatten.rs`, `src/span.rs` and
-`src/error.rs` have `#[cfg(test)]` modules. They are the place for focused
+`src/lex.rs`, `src/parser/parse_literals.rs`, `src/flatten.rs`, `src/span.rs`
+and `src/error.rs` have `#[cfg(test)]` modules. They are the place for focused
 behaviour of one function (a new escape sequence, a new unit, a lexer edge).
+The parser modules are private, so tests of whole constructs go through the
+public `parse` functions in the integration tests below.
 
 ## `tests/syntax.rs`: one test per construct
 
 Each test parses snippets and asserts on the tree with small helpers:
 
 ```rust,ignore
-let ast = ok("let x = 1 + 1 | into string");          // parse or panic with a rendered diagnostic
-let b = kind!(expr(&ast), ExprKind::Let(b) => b);      // match a variant or panic with the actual one
-assert_eq!(text(&ast, b.eq.unwrap()), "=");
+let ast = ok("let x = 1 + 1 | into string");                      // parse or panic with a rendered diagnostic
+let binding = kind!(expr(&ast), Expr::Let(binding) => binding);    // match a variant or panic with the actual one
+assert_eq!(text(&ast, binding.eq.unwrap()), "=");
 assert!(matches!(err("1 +").primary().kind, ErrorKind::Expected(_)));
 ```
 
@@ -156,12 +158,18 @@ this writing.
   `; here:` line (the function here, or `consumer`), and section 9 records
   the differences that were found and closed.
 
-Run these after any change to the lexer or to `value.rs`; they take seconds.
+Run these after any change to the lexer (`src/lex.rs`) or to how an item
+becomes a value (`parse_value` in `src/parser/parse_expressions.rs`,
+`src/parser/parse_literals.rs`); they take seconds.
 
 ## Benchmarks
 
 * `benches/parse.rs` (criterion): per-file, per-snippet and lexer-only
-  throughput. `cargo bench`.
+  throughput. `cargo bench`. To measure a change, save a named baseline
+  before it (`cargo bench --bench parse -- --save-baseline before`) and
+  compare against it after (`-- --baseline before`); do this whenever you
+  rewrite a parser with combinators or add work to a hot path. Chapter 10
+  and `how-to.md` have the details.
 * `tools/nushell-harness` (`bench-vs-nu-parser`): times `nu-parser` and this
   crate on the same files, with `nu-parser` given the full command set.
   `tools/nushell-harness-release` builds the same harness against the

@@ -1,43 +1,66 @@
-//! The parser proper.
+//! The parser proper, laid out like nu-parser: each file holds the functions
+//! of its nu-parser namesake, under the same names (`parse_block`,
+//! `parse_pipeline_element`, `parse_expression`, `parse_value`, `parse_call`,
+//! `parse_def`, ...).
 //!
-//! Parsing happens in layers that mirror the language:
+//! | File | What it parses | nu-parser |
+//! | --- | --- | --- |
+//! | [`lite_parser`] | groups a block's tokens into commands | `lite_parser.rs` |
+//! | [`parse_pipelines`] | blocks, pipelines, pipeline elements, redirections | `parse_pipelines.rs` |
+//! | [`parse_expressions`] | expressions, builtin dispatch, math, values, lists, records, blocks, closures, match blocks | `parse_expressions.rs` |
+//! | [`parse_calls`] | calls and their arguments, external and `%` calls, attributes, keyword-command signatures | `parse_calls.rs` |
+//! | [`parse_keywords`] | parser keywords, and [`parse_keywords::KeywordCall`]: nu's flags of a keyword command | `parse_keywords.rs` |
+//! | [`parse_def`] | `def`, `extern`, `for`, predeclaration | `parse_def.rs` |
+//! | [`parse_bindings`] | `let`, `mut`, `const` | `parse_bindings.rs` |
+//! | [`parse_alias`] | `alias` | `parse_alias.rs` |
+//! | [`parse_module`] | `module`, `use`, `export`, `export-env` | `parse_module.rs` |
+//! | [`parse_source`] | `where` | `parse_source.rs` |
+//! | [`parse_control_flow`] | `if`, `match`, `while`, `loop`, `try`, `return`, `break`, `continue` | (ordinary commands in nu) |
+//! | [`parse_signatures`] | signatures, variable declarations, input/output types | `parse_signatures.rs` |
+//! | [`parse_shape_specs`] | type annotations and completers | `parse_shape_specs.rs` |
+//! | [`parse_patterns`] | `match` patterns | `parse_patterns.rs` |
+//! | [`parse_literals`] | numbers, units, datetimes, binary, strings, variables, cell paths, ranges | `parse_literals.rs` |
+//! | [`parse_helpers`] | small shared helpers | `parse_helpers.rs` |
 //!
-//! 1. [`block`]: a lexed token stream is grouped into pipelines and commands
-//!    (comments, `;`, newlines, `|`, redirections, assignment absorption).
-//! 2. [`statement`]: one command's items are recognised as a keyword statement
-//!    (`def`, `let`, `if`, ...), a call, an assignment, or a math expression.
-//! 3. [`expr`]: math expressions with precedence, calls and their arguments.
-//! 4. [`value`]: a single item becomes a literal, variable, path, collection,
-//!    closure, block or subexpression, re-lexing its interior as needed. Its
-//!    helpers live in [`strings`], [`cellpath`] and [`collections`].
-//! 5. [`literal`], [`signature`], [`pattern`]: character-level parsers for
-//!    literals, signatures/types and match patterns.
-//!
-//! Layers 2 and 3 walk the items of one command with a [`cursor::Cursor`].
-//!
-//! All layers share [`St`], a copyable handle to the source text and the
-//! mutable [`Shared`] state (collected comments, diagnostics, declared names).
+//! Every function takes the [`WorkingSet`] (nu's `StateWorkingSet`): the
+//! source, the known command names, and what the parse collects on the side.
+//! A function that reads one item takes it as a span, like nu's
+//! `parse_value(working_set, span, shape)`; one that reads a sequence of items
+//! takes a [`tokens::Tokens`] stream, which carries the working set and which
+//! winnow's combinators drive (`repeat`, `opt`, `alt`, `separated`,
+//! `expression`, ...). Nested constructs (`[...]`, `{...}`, `(...)`) are lexed
+//! again from their interior, as in nu.
 
-pub(crate) mod block;
-pub(crate) mod cellpath;
-pub(crate) mod collections;
-pub(crate) mod cursor;
-pub(crate) mod expr;
-pub(crate) mod literal;
-pub(crate) mod pattern;
-pub(crate) mod signature;
-pub(crate) mod statement;
-pub(crate) mod strings;
-pub(crate) mod value;
+pub(crate) mod lite_parser;
+pub(crate) mod parse_alias;
+pub(crate) mod parse_bindings;
+pub(crate) mod parse_calls;
+pub(crate) mod parse_control_flow;
+pub(crate) mod parse_def;
+pub(crate) mod parse_expressions;
+pub(crate) mod parse_helpers;
+pub(crate) mod parse_keywords;
+pub(crate) mod parse_literals;
+pub(crate) mod parse_module;
+pub(crate) mod parse_patterns;
+pub(crate) mod parse_pipelines;
+pub(crate) mod parse_shape_specs;
+pub(crate) mod parse_signatures;
+pub(crate) mod parse_source;
+pub(crate) mod tokens;
+pub(crate) mod working_set;
 
-use std::cell::RefCell;
 use std::collections::HashSet;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::sync::Arc;
 
-use crate::ast::{Ast, Block, Comment};
+use crate::ast::{Ast, Block};
 use crate::error::Diagnostic;
-use crate::lexer::{LexOptions, Token, TokenKind, lex};
+use crate::lex::{LexOptions, lex};
 use crate::span::Span;
+
+use working_set::Collected;
+pub(crate) use working_set::WorkingSet;
 
 /// Configuration for a parse.
 ///
@@ -53,9 +76,50 @@ pub struct ParseConfig {
 /// Known command names plus an index of the first words of multi-word names,
 /// so that the common single-word head needs no string building at all.
 #[derive(Debug, Default)]
-struct CommandSet {
-    names: HashSet<Box<str>>,
-    prefixes: HashSet<Box<str>>,
+pub(crate) struct CommandSet {
+    names: NameSet,
+    prefixes: NameSet,
+}
+
+/// A set of command names, hashed with [`NameHasher`].
+type NameSet = HashSet<Box<str>, BuildHasherDefault<NameHasher>>;
+
+/// A fast hash for short command names: the multiply-rotate hash rustc uses
+/// (FxHash). Names are looked up for every call head, and SipHash, the
+/// standard library's default, costs more than the rest of the lookup.
+#[derive(Default)]
+struct NameHasher(u64);
+
+impl NameHasher {
+    const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+    #[inline]
+    fn add(&mut self, word: u64) {
+        self.0 = (self.0.rotate_left(5) ^ word).wrapping_mul(Self::SEED);
+    }
+}
+
+impl Hasher for NameHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let (words, rest) = bytes.as_chunks::<8>();
+        for word in words {
+            self.add(u64::from_le_bytes(*word));
+        }
+        for &byte in rest {
+            self.add(u64::from(byte));
+        }
+    }
+
+    #[inline]
+    fn write_u8(&mut self, byte: u8) {
+        self.add(u64::from(byte));
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
 }
 
 impl CommandSet {
@@ -135,148 +199,21 @@ impl Clone for CommandSet {
     }
 }
 
-/// Mutable state shared by every parser layer during one parse.
-#[derive(Debug)]
-pub struct Shared {
-    config: ParseConfig,
-    comments: Vec<Comment>,
-    /// Source text nu-parser accepts and discards (see [`Ast::ignored`]).
-    ignored: Vec<Span>,
-    diagnostics: Vec<Diagnostic>,
-    /// Command names declared with `def`/`extern`/`alias` in enclosing blocks,
-    /// innermost scope last.
-    decl_scopes: Vec<CommandSet>,
-}
-
-/// Copyable handle to the source and the shared state.
-#[derive(Clone, Copy, Debug)]
-pub struct St<'s, 'a> {
-    /// The complete source text.
-    pub src: &'a str,
-    shared: &'s RefCell<Shared>,
-}
-
-impl<'s, 'a> St<'s, 'a> {
-    /// The text of a span.
-    #[inline]
-    pub fn text(&self, span: Span) -> &'a str {
-        span.slice(self.src)
-    }
-
-    /// The text of a token.
-    #[inline]
-    pub fn tok(&self, tok: &Token) -> &'a str {
-        tok.span.slice(self.src)
-    }
-
-    /// Record a comment.
-    pub fn comment(&self, span: Span) {
-        self.shared.borrow_mut().comments.push(Comment { span });
-    }
-
-    /// Record every comment token in `tokens`.
-    pub fn comments_from(&self, tokens: &[Token]) {
-        let mut shared = self.shared.borrow_mut();
-        shared
-            .comments
-            .extend(tokens.iter().filter(|t| t.kind == TokenKind::Comment).map(|t| Comment { span: t.span }));
-    }
-
-    /// Record text that nu-parser accepts and discards (see [`Ast::ignored`]).
-    pub fn ignore(&self, span: Span) {
-        if !span.is_empty() {
-            self.shared.borrow_mut().ignored.push(span);
-        }
-    }
-
-    /// Drop the ignored text recorded from `start` on: a statement that turns
-    /// out to be a help call is parsed again as an ordinary call.
-    pub fn forget_ignored_from(&self, start: usize) {
-        self.shared.borrow_mut().ignored.retain(|s| s.start < start);
-    }
-
-    /// Record a diagnostic (used for recovered errors).
-    pub fn error(&self, d: Diagnostic) {
-        self.shared.borrow_mut().diagnostics.push(d);
-    }
-
-    /// Whether `name` is a known command (configured or declared in scope).
-    pub fn is_known_command(&self, name: &str) -> bool {
-        let shared = self.shared.borrow();
-        shared.config.is_known(name) || shared.decl_scopes.iter().any(|scope| scope.names.contains(name))
-    }
-
-    /// Whether `word` starts some known multi-word command.
-    pub fn is_command_prefix(&self, word: &str) -> bool {
-        let shared = self.shared.borrow();
-        shared.config.is_prefix(word) || shared.decl_scopes.iter().any(|scope| scope.prefixes.contains(word))
-    }
-
-    /// Whether `name` is one of the configured (built-in) commands, ignoring
-    /// declarations in the file; `None` when no commands are configured at all.
-    pub fn is_builtin_command(&self, name: &str) -> Option<bool> {
-        let config = &self.shared.borrow().config;
-        (!config.is_empty()).then(|| config.is_known(name))
-    }
-
-    /// Whether `name` was declared with `def`/`extern`/`alias` in an enclosing block.
-    pub fn is_declared_command(&self, name: &str) -> bool {
-        self.shared.borrow().decl_scopes.iter().any(|scope| scope.names.contains(name))
-    }
-
-    /// Declare a command name in the innermost scope.
-    pub fn declare_command(&self, name: &str) {
-        let mut shared = self.shared.borrow_mut();
-        if let Some(scope) = shared.decl_scopes.last_mut() {
-            scope.insert(name);
-        }
-    }
-
-    /// Enter a declaration scope.
-    pub fn push_scope(&self) {
-        self.shared.borrow_mut().decl_scopes.push(CommandSet::default());
-    }
-
-    /// Leave a declaration scope.
-    pub fn pop_scope(&self) {
-        self.shared.borrow_mut().decl_scopes.pop();
-    }
-
-    /// Lex `span` of the source with the given options, recording lexer errors.
-    /// On error, returns the diagnostic (already recorded is *not* done here so
-    /// callers can decide whether to record or propagate).
-    pub fn lex_span(&self, span: Span, opts: LexOptions) -> Result<Vec<Token>, Diagnostic> {
-        lex(self.text(span), span.start, opts)
-    }
-}
-
-/// Parse `source` into an AST plus any diagnostics.
-pub(crate) fn parse_source<'a>(source: &'a str, config: &ParseConfig) -> (Ast<'a>, Vec<Diagnostic>) {
-    let shared = RefCell::new(Shared {
-        config: config.clone(),
-        comments: Vec::new(),
-        ignored: Vec::new(),
-        diagnostics: Vec::new(),
-        decl_scopes: vec![CommandSet::default()],
-    });
-    let st = St { src: source, shared: &shared };
-    let full = Span::new(0, source.len());
+/// Parse `source` into an AST plus any diagnostics (nu's `parse`).
+pub(crate) fn parse<'a>(source: &'a str, config: &ParseConfig) -> (Ast<'a>, Vec<Diagnostic>) {
+    let working_set = WorkingSet::new(source, config);
+    let whole_source = Span::new(0, source.len());
     let shebang = source.starts_with("#!").then(|| {
         let end = source.find('\n').unwrap_or(source.len());
         Span::new(0, end)
     });
-    let block = match st.lex_span(full, LexOptions::BLOCK) {
-        Ok(tokens) => block::parse_block(st, cursor::Cursor::from_lexed(&tokens), full),
-        Err(d) => {
-            st.error(d);
-            Block { span: full, pipelines: Vec::new() }
+    let block = match lex(source, 0, LexOptions::BLOCK) {
+        Ok(tokens) => parse_pipelines::parse_block(tokens::Tokens::from_lexed(&working_set, &tokens), whole_source),
+        Err(diagnostic) => {
+            working_set.error(diagnostic);
+            Block { span: whole_source, pipelines: Vec::new() }
         }
     };
-    let mut shared = shared.into_inner();
-    shared.comments.sort_by_key(|c| (c.span.start, c.span.end));
-    shared.comments.dedup();
-    shared.ignored.sort_by_key(|s| (s.start, s.end));
-    shared.ignored.dedup();
-    shared.diagnostics.sort_by_key(|d| (d.span.start, d.span.end));
-    (Ast { source, block, comments: shared.comments, shebang, ignored: shared.ignored }, shared.diagnostics)
+    let Collected { comments, ignored, parse_errors } = working_set.into_collected();
+    (Ast { source, block, comments, shebang, ignored }, parse_errors)
 }

@@ -10,19 +10,19 @@
 //! The shape follows `nu-protocol`'s AST closely so that an evaluator or a
 //! type checker can consume it directly: a [`Block`] is a list of
 //! [`Pipeline`]s, a pipeline is a list of [`PipelineElement`]s, and every
-//! statement keyword (`let`, `def`, `if`, ...) is an [`ExprKind`] variant.
+//! statement keyword (`let`, `def`, `if`, ...) is an [`Expr`] variant.
 
 mod visit;
 
 pub use visit::{
-    Visitor, walk_block, walk_element, walk_expr, walk_param, walk_pattern, walk_pipeline, walk_redirection,
-    walk_signature, walk_type,
+    Visitor, walk_block, walk_expression, walk_match_pattern, walk_parameter, walk_pipeline, walk_pipeline_element,
+    walk_redirection, walk_signature, walk_type_annotation,
 };
 
 use std::borrow::Cow;
 use std::fmt;
 
-use crate::lexer::{AssignOp, RedirectOp, RedirectSource};
+use crate::lex::{AssignmentOperator, RedirectionOperator, RedirectionSource};
 use crate::span::{Span, Spanned};
 
 /// A parsed source file or snippet.
@@ -112,44 +112,44 @@ pub struct PipelineElement<'a> {
     /// The span of the `|` preceding this element, if it is not the first.
     pub pipe: Option<Span>,
     /// The expression.
-    pub expr: Expr<'a>,
+    pub expr: Expression<'a>,
     /// A redirection following the expression.
-    pub redirection: Option<Redirection<'a>>,
+    pub redirection: Option<PipelineRedirection<'a>>,
 }
 
 /// Where a redirected stream goes.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub enum RedirectTarget<'a> {
+pub enum RedirectionTarget<'a> {
     /// `o> path` / `o>> path`.
     File {
         /// The operator.
-        op: Spanned<RedirectOp>,
+        op: Spanned<RedirectionOperator>,
         /// `true` for `>>`.
         append: bool,
         /// The path expression.
-        path: Box<Expr<'a>>,
+        path: Box<Expression<'a>>,
     },
     /// `e>|` / `o+e>|`: into the next pipeline element.
     Pipe {
         /// The operator.
-        op: Spanned<RedirectOp>,
+        op: Spanned<RedirectionOperator>,
     },
 }
 
-impl RedirectTarget<'_> {
+impl RedirectionTarget<'_> {
     /// The operator's span.
     pub fn op_span(&self) -> Span {
         match self {
-            RedirectTarget::File { op, .. } | RedirectTarget::Pipe { op } => op.span,
+            RedirectionTarget::File { op, .. } | RedirectionTarget::Pipe { op } => op.span,
         }
     }
 
     /// The full span, including a file target.
     pub fn span(&self) -> Span {
         match self {
-            RedirectTarget::File { op, path, .. } => op.span.merge(path.span),
-            RedirectTarget::Pipe { op } => op.span,
+            RedirectionTarget::File { op, path, .. } => op.span.merge(path.span),
+            RedirectionTarget::Pipe { op } => op.span,
         }
     }
 }
@@ -157,29 +157,29 @@ impl RedirectTarget<'_> {
 /// A redirection attached to a pipeline element.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub enum Redirection<'a> {
+pub enum PipelineRedirection<'a> {
     /// One stream (or both, with `o+e>`) redirected.
     Single {
         /// Which stream.
-        source: RedirectSource,
+        source: RedirectionSource,
         /// Where to.
-        target: RedirectTarget<'a>,
+        target: RedirectionTarget<'a>,
     },
     /// stdout and stderr redirected separately: `o> a e> b`.
     Separate {
         /// The stdout target.
-        out: RedirectTarget<'a>,
+        out: RedirectionTarget<'a>,
         /// The stderr target.
-        err: RedirectTarget<'a>,
+        err: RedirectionTarget<'a>,
     },
 }
 
-impl Redirection<'_> {
+impl PipelineRedirection<'_> {
     /// The span covering the whole redirection.
     pub fn span(&self) -> Span {
         match self {
-            Redirection::Single { target, .. } => target.span(),
-            Redirection::Separate { out, err } => out.span().merge(err.span()),
+            PipelineRedirection::Single { target, .. } => target.span(),
+            PipelineRedirection::Separate { out, err } => out.span().merge(err.span()),
         }
     }
 }
@@ -187,36 +187,36 @@ impl Redirection<'_> {
 /// An expression with its span.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub struct Expr<'a> {
+pub struct Expression<'a> {
     /// Where the expression is.
     pub span: Span,
     /// What it is.
-    pub kind: ExprKind<'a>,
+    pub expr: Expr<'a>,
 }
 
-impl<'a> Expr<'a> {
+impl<'a> Expression<'a> {
     /// Construct an expression.
-    pub fn new(kind: ExprKind<'a>, span: Span) -> Self {
-        Self { span, kind }
+    pub fn new(expr: Expr<'a>, span: Span) -> Self {
+        Self { span, expr }
     }
 
     /// The string value if this is a plain string literal (bare or quoted, not interpolated).
     pub fn as_str(&self) -> Option<&str> {
-        match &self.kind {
-            ExprKind::String(s) => Some(&s.value),
+        match &self.expr {
+            Expr::String(s) => Some(&s.value),
             _ => None,
         }
     }
 
     /// `true` for the placeholder produced after a parse error.
     pub fn is_garbage(&self) -> bool {
-        matches!(self.kind, ExprKind::Garbage)
+        matches!(self.expr, Expr::Garbage)
     }
 
     /// The span of the keyword that starts this expression (`let`, `if`, ...),
-    /// if it is a keyword statement. See [`ExprKind::keyword`].
+    /// if it is a keyword statement. See [`Expr::keyword`].
     pub fn keyword_span(&self) -> Option<Span> {
-        self.kind.keyword().map(|kw| Span::new(self.span.start, self.span.start + kw.len()))
+        self.expr.keyword().map(|kw| Span::new(self.span.start, self.span.start + kw.len()))
     }
 }
 
@@ -224,7 +224,7 @@ impl<'a> Expr<'a> {
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 #[non_exhaustive]
-pub enum ExprKind<'a> {
+pub enum Expr<'a> {
     // --- literals -------------------------------------------------------
     /// `true` / `false`.
     Bool(bool),
@@ -235,11 +235,11 @@ pub enum ExprKind<'a> {
     /// A float literal, including `inf`, `-inf` and `NaN`.
     Float(f64),
     /// A string literal of any quoting style except interpolation.
-    String(StringLit<'a>),
+    String(StringLiteral<'a>),
     /// `$"..."`, `$'...'`, or a bare word containing `(...)`.
-    Interpolation(Interpolation<'a>),
+    StringInterpolation(StringInterpolation<'a>),
     /// `0x[...]`, `0o[...]`, `0b[...]`.
-    Binary(BinaryLit),
+    Binary(BinaryLiteral),
     /// `1sec`, `2.5hr`, ...
     Duration(Duration),
     /// `1kb`, `10MiB`, ...
@@ -341,32 +341,32 @@ pub enum ExprKind<'a> {
     Garbage,
 }
 
-impl<'a> ExprKind<'a> {
+impl<'a> Expr<'a> {
     /// The keyword that starts this expression, for keyword statements
     /// (`let`, `def`, `if`, ...). The keyword is always the first word of the
-    /// expression's span, so its span is [`Expr::keyword_span`].
+    /// expression's span, so its span is [`Expression::keyword_span`].
     pub fn keyword(&self) -> Option<&'static str> {
         Some(match self {
-            ExprKind::Let(_) => "let",
-            ExprKind::Mut(_) => "mut",
-            ExprKind::Const(_) => "const",
-            ExprKind::Def(_) => "def",
-            ExprKind::Extern(_) => "extern",
-            ExprKind::Alias(_) => "alias",
-            ExprKind::Use(_) => "use",
-            ExprKind::Module(_) => "module",
-            ExprKind::Export(_) => "export",
-            ExprKind::ExportEnv(_) => "export-env",
-            ExprKind::If(_) => "if",
-            ExprKind::Match(_) => "match",
-            ExprKind::For(_) => "for",
-            ExprKind::While(_) => "while",
-            ExprKind::Loop(_) => "loop",
-            ExprKind::Try(_) => "try",
-            ExprKind::Return(_) => "return",
-            ExprKind::Break => "break",
-            ExprKind::Continue => "continue",
-            ExprKind::Where(_) => "where",
+            Expr::Let(_) => "let",
+            Expr::Mut(_) => "mut",
+            Expr::Const(_) => "const",
+            Expr::Def(_) => "def",
+            Expr::Extern(_) => "extern",
+            Expr::Alias(_) => "alias",
+            Expr::Use(_) => "use",
+            Expr::Module(_) => "module",
+            Expr::Export(_) => "export",
+            Expr::ExportEnv(_) => "export-env",
+            Expr::If(_) => "if",
+            Expr::Match(_) => "match",
+            Expr::For(_) => "for",
+            Expr::While(_) => "while",
+            Expr::Loop(_) => "loop",
+            Expr::Try(_) => "try",
+            Expr::Return(_) => "return",
+            Expr::Break => "break",
+            Expr::Continue => "continue",
+            Expr::Where(_) => "where",
             _ => return None,
         })
     }
@@ -391,14 +391,14 @@ pub enum Quote {
 /// A string literal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub struct StringLit<'a> {
+pub struct StringLiteral<'a> {
     /// The decoded value (escapes processed, quotes removed).
     pub value: Cow<'a, str>,
     /// How it was written.
     pub quote: Quote,
 }
 
-impl<'a> StringLit<'a> {
+impl<'a> StringLiteral<'a> {
     /// A bare word.
     pub fn bare(value: &'a str) -> Self {
         Self { value: Cow::Borrowed(value), quote: Quote::Bare }
@@ -408,17 +408,17 @@ impl<'a> StringLit<'a> {
 /// An interpolated string.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub struct Interpolation<'a> {
+pub struct StringInterpolation<'a> {
     /// [`Quote::Double`], [`Quote::Single`] or [`Quote::Bare`].
     pub quote: Quote,
     /// Literal text and subexpressions, in order.
-    pub parts: Vec<InterpPart<'a>>,
+    pub parts: Vec<InterpolationPart<'a>>,
 }
 
 /// One piece of an interpolated string.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub enum InterpPart<'a> {
+pub enum InterpolationPart<'a> {
     /// Literal text (already unescaped for double-quoted strings).
     Text {
         /// The source span of the text.
@@ -427,13 +427,13 @@ pub enum InterpPart<'a> {
         value: Cow<'a, str>,
     },
     /// A `( ... )` subexpression.
-    Expr(Expr<'a>),
+    Expression(Box<Expression<'a>>),
 }
 
 /// A binary literal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub struct BinaryLit {
+pub struct BinaryLiteral {
     /// 2, 8 or 16.
     pub radix: u32,
     /// The decoded bytes.
@@ -615,15 +615,24 @@ pub enum RangeInclusion {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Range<'a> {
     /// The lower bound.
-    pub from: Option<Box<Expr<'a>>>,
+    pub from: Option<Box<Expression<'a>>>,
     /// The second element (`1..3..10` has `next = 3`).
-    pub next: Option<Box<Expr<'a>>>,
+    pub next: Option<Box<Expression<'a>>>,
     /// The upper bound.
-    pub to: Option<Box<Expr<'a>>>,
+    pub to: Option<Box<Expression<'a>>>,
+    /// The range operator.
+    pub operator: RangeOperator,
+}
+
+/// The operator of a [`Range`]: `..`, `..<` or `..=`, and the `..` before
+/// `next` in `1..3..10`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct RangeOperator {
     /// Whether `to` is included.
     pub inclusion: RangeInclusion,
     /// The span of the range operator (`..`, `..<` or `..=`).
-    pub op_span: Span,
+    pub span: Span,
     /// The span of the `..` before `next`, if any.
     pub next_op_span: Option<Span>,
 }
@@ -663,7 +672,7 @@ pub struct PathMember<'a> {
     /// `?`: missing members yield `null` instead of an error.
     pub optional: bool,
     /// `!`: case-insensitive column match.
-    pub insensitive: bool,
+    pub case_insensitive: bool,
 }
 
 /// Index or column.
@@ -692,11 +701,11 @@ pub struct CellPath<'a> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct FullCellPath<'a> {
     /// The head expression.
-    pub head: Box<Expr<'a>>,
+    pub head: Box<Expression<'a>>,
     /// `true` when the head is the implicit `$it` of a row condition.
     pub implicit_head: bool,
     /// The members after the head.
-    pub members: Vec<PathMember<'a>>,
+    pub tail: Vec<PathMember<'a>>,
 }
 
 /// One element of a list literal.
@@ -704,13 +713,13 @@ pub struct FullCellPath<'a> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum ListItem<'a> {
     /// A value.
-    Item(Expr<'a>),
+    Item(Expression<'a>),
     /// `...expr`.
     Spread {
         /// The span of the `...`.
         dots: Span,
         /// The spread expression.
-        expr: Expr<'a>,
+        expr: Expression<'a>,
     },
 }
 
@@ -729,9 +738,9 @@ impl ListItem<'_> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Table<'a> {
     /// The header list `[col1 col2]`.
-    pub columns: Box<Expr<'a>>,
+    pub columns: Box<Expression<'a>>,
     /// Each row as a list expression.
-    pub rows: Vec<Expr<'a>>,
+    pub rows: Vec<Expression<'a>>,
 }
 
 /// One entry of a record literal.
@@ -742,18 +751,18 @@ pub enum RecordItem<'a> {
     /// `key: value`.
     Pair {
         /// The key: a string literal, `$var`, or `(subexpression)`.
-        key: Expr<'a>,
+        key: Expression<'a>,
         /// The span of the `:`.
         colon: Span,
         /// The value.
-        value: Expr<'a>,
+        value: Expression<'a>,
     },
     /// `...expr`.
     Spread {
         /// The span of the `...`.
         dots: Span,
         /// The spread expression.
-        expr: Expr<'a>,
+        expr: Expression<'a>,
     },
 }
 
@@ -782,11 +791,11 @@ pub struct Closure<'a> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct BinaryOp<'a> {
     /// The left operand.
-    pub lhs: Box<Expr<'a>>,
+    pub lhs: Box<Expression<'a>>,
     /// The operator with its span (spelling recoverable from the span).
     pub op: Spanned<Operator>,
     /// The right operand.
-    pub rhs: Box<Expr<'a>>,
+    pub rhs: Box<Expression<'a>>,
 }
 
 /// `not expr`.
@@ -796,7 +805,7 @@ pub struct UnaryNot<'a> {
     /// The span of the `not` keyword.
     pub not_span: Span,
     /// The operand.
-    pub expr: Box<Expr<'a>>,
+    pub expr: Box<Expression<'a>>,
 }
 
 /// An assignment. The right-hand side is a whole pipeline (Nushell parses
@@ -805,9 +814,9 @@ pub struct UnaryNot<'a> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Assignment<'a> {
     /// The target: `$x` or a cell path on a variable.
-    pub lhs: Box<Expr<'a>>,
+    pub lhs: Box<Expression<'a>>,
     /// The operator.
-    pub op: Spanned<AssignOp>,
+    pub op: Spanned<AssignmentOperator>,
     /// The right-hand side.
     pub rhs: Block<'a>,
 }
@@ -1038,7 +1047,7 @@ pub struct Call<'a> {
     /// The command name.
     pub head: CallHead<'a>,
     /// The arguments in source order.
-    pub args: Vec<Arg<'a>>,
+    pub arguments: Vec<Argument<'a>>,
     /// The span of a `%` sigil (`%ls`, `% ls`), which makes Nushell run the
     /// built-in command of that name even when a custom command or alias
     /// shadows it.
@@ -1053,37 +1062,37 @@ pub struct DynamicCall<'a> {
     /// The span of the `%`.
     pub sigil: Span,
     /// The expression naming the command: a variable, cell path or subexpression.
-    pub head: Box<Expr<'a>>,
+    pub head: Box<Expression<'a>>,
     /// The arguments in source order.
-    pub args: Vec<Arg<'a>>,
+    pub arguments: Vec<Argument<'a>>,
 }
 
 impl<'a> Call<'a> {
     /// Positional arguments only, in order.
-    pub fn positionals(&self) -> impl Iterator<Item = &Expr<'a>> {
-        self.args.iter().filter_map(|a| match a {
-            Arg::Positional(e) => Some(e),
+    pub fn positional_iter(&self) -> impl Iterator<Item = &Expression<'a>> {
+        self.arguments.iter().filter_map(|argument| match argument {
+            Argument::Positional(expression) => Some(expression),
             _ => None,
         })
     }
 
-    /// The flag named `name` (long name without dashes), if given.
-    pub fn flag(&self, name: &str) -> Option<&Flag<'a>> {
-        self.args.iter().find_map(|a| match a {
-            Arg::Flag(f) if f.long && f.name == name => Some(f),
+    /// The named argument `--name` (long name without dashes), if given.
+    pub fn get_named_arg(&self, name: &str) -> Option<&NamedArgument<'a>> {
+        self.arguments.iter().find_map(|argument| match argument {
+            Argument::Named(named) if named.long && named.name == name => Some(named),
             _ => None,
         })
     }
 }
 
-/// A flag argument.
+/// A named argument (a flag): nu-protocol's `Argument::Named`.
 ///
 /// Without a command signature the parser cannot know whether a flag takes a
 /// value, so `value` is only set for the `--flag=value` form; a following
 /// positional argument may be the flag's value.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub struct Flag<'a> {
+pub struct NamedArgument<'a> {
     /// The span of the whole flag, including any `=value`.
     pub span: Span,
     /// The name without leading dashes. For a batch of short flags (`-abc`)
@@ -1092,36 +1101,36 @@ pub struct Flag<'a> {
     /// `true` for `--long`, `false` for `-s`.
     pub long: bool,
     /// The value after `=`, if written as `--flag=value`.
-    pub value: Option<Box<Expr<'a>>>,
+    pub value: Option<Box<Expression<'a>>>,
 }
 
 /// One argument of a call.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub enum Arg<'a> {
+pub enum Argument<'a> {
     /// A value.
-    Positional(Expr<'a>),
+    Positional(Expression<'a>),
     /// `--flag`, `--flag=value`, `-f`.
-    Flag(Flag<'a>),
+    Named(NamedArgument<'a>),
     /// `...expr`.
     Spread {
         /// The span of the `...`.
         dots: Span,
         /// The spread expression.
-        expr: Expr<'a>,
+        expr: Expression<'a>,
     },
     /// `--` (everything after is positional).
     EndOfOptions(Span),
 }
 
-impl Arg<'_> {
+impl Argument<'_> {
     /// The full span.
     pub fn span(&self) -> Span {
         match self {
-            Arg::Positional(e) => e.span,
-            Arg::Flag(f) => f.span,
-            Arg::Spread { dots, expr } => dots.merge(expr.span),
-            Arg::EndOfOptions(s) => *s,
+            Argument::Positional(e) => e.span,
+            Argument::Named(f) => f.span,
+            Argument::Spread { dots, expr } => dots.merge(expr.span),
+            Argument::EndOfOptions(s) => *s,
         }
     }
 }
@@ -1133,32 +1142,32 @@ pub struct ExternalCall<'a> {
     /// The span of the `^`.
     pub caret: Span,
     /// The command: a string, interpolation, variable or subexpression.
-    pub head: Box<Expr<'a>>,
+    pub head: Box<Expression<'a>>,
     /// The arguments.
-    pub args: Vec<ExternalArg<'a>>,
+    pub arguments: Vec<ExternalArgument<'a>>,
 }
 
 /// One argument of an external call.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub enum ExternalArg<'a> {
+pub enum ExternalArgument<'a> {
     /// A value (bare words become strings, `$vars`, `(...)`, `[...]`, `{...}` are parsed).
-    Regular(Expr<'a>),
+    Regular(Expression<'a>),
     /// `...expr`.
     Spread {
         /// The span of the `...`.
         dots: Span,
         /// The spread expression.
-        expr: Expr<'a>,
+        expr: Expression<'a>,
     },
 }
 
-impl ExternalArg<'_> {
+impl ExternalArgument<'_> {
     /// The full span.
     pub fn span(&self) -> Span {
         match self {
-            ExternalArg::Regular(e) => e.span,
-            ExternalArg::Spread { dots, expr } => dots.merge(expr.span),
+            ExternalArgument::Regular(e) => e.span,
+            ExternalArgument::Spread { dots, expr } => dots.merge(expr.span),
         }
     }
 }
@@ -1172,7 +1181,7 @@ pub struct EnvAssignment<'a> {
     /// The variable name.
     pub name: Spanned<&'a str>,
     /// The value (a string or `$expr`).
-    pub value: Expr<'a>,
+    pub value: Expression<'a>,
 }
 
 /// `FOO=bar cmd`.
@@ -1182,7 +1191,7 @@ pub struct EnvShorthand<'a> {
     /// The assignments, in order.
     pub vars: Vec<EnvAssignment<'a>>,
     /// The command run with them.
-    pub expr: Box<Expr<'a>>,
+    pub expr: Box<Expression<'a>>,
 }
 
 /// `@name args`.
@@ -1194,7 +1203,7 @@ pub struct Attribute<'a> {
     /// The attribute name (without `@`), e.g. `example` or `search-terms`.
     pub name: Spanned<Cow<'a, str>>,
     /// The arguments, parsed like call arguments.
-    pub args: Vec<Arg<'a>>,
+    pub arguments: Vec<Argument<'a>>,
 }
 
 /// Attributes followed by the definition they annotate.
@@ -1204,7 +1213,7 @@ pub struct AttributeBlock<'a> {
     /// The attributes, in order.
     pub attributes: Vec<Attribute<'a>>,
     /// The annotated `def`/`extern`/`export ...`.
-    pub item: Box<Expr<'a>>,
+    pub item: Box<Expression<'a>>,
 }
 
 /// A type annotation.
@@ -1213,8 +1222,8 @@ pub struct AttributeBlock<'a> {
 pub struct TypeAnnotation<'a> {
     /// The span of the type text.
     pub span: Span,
-    /// The type.
-    pub kind: TypeKind<'a>,
+    /// The shape the annotation names.
+    pub shape: SyntaxShape<'a>,
 }
 
 /// A named field of a `record<...>` or `table<...>` type.
@@ -1227,16 +1236,16 @@ pub struct TypeField<'a> {
     pub ty: TypeAnnotation<'a>,
 }
 
-/// The types Nushell knows.
+/// The shape named by a type annotation (nu-protocol's `SyntaxShape`, as `parse_shape_name` reads it).
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub enum TypeKind<'a> {
+pub enum SyntaxShape<'a> {
     /// `any`
     Any,
     /// `binary`
     Binary,
     /// `bool`
-    Bool,
+    Boolean,
     /// `cell-path`
     CellPath,
     /// `closure`
@@ -1250,13 +1259,13 @@ pub enum TypeKind<'a> {
     /// `error`
     Error,
     /// `external_arg`
-    ExternalArg,
+    ExternalArgument,
     /// `float`
     Float,
     /// `filesize`
     Filesize,
     /// `glob`
-    Glob,
+    GlobPattern,
     /// `int`
     Int,
     /// `nothing`
@@ -1264,7 +1273,7 @@ pub enum TypeKind<'a> {
     /// `number`
     Number,
     /// `path`
-    Path,
+    Filepath,
     /// `range`
     Range,
     /// `string`
@@ -1282,18 +1291,18 @@ pub enum TypeKind<'a> {
 /// A parameter in a signature or closure parameter list.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub struct Param<'a> {
+pub struct Parameter<'a> {
     /// From the name to the end of the default value.
     pub span: Span,
     /// The parameter kind.
-    pub kind: ParamKind<'a>,
+    pub kind: ParameterKind<'a>,
     /// The name: the variable name for positionals, the long name for
     /// `--flag(-f)`, or the short letter for `-f`.
     pub name: Spanned<&'a str>,
     /// The type after `:`.
     pub ty: Option<TypeAnnotation<'a>>,
     /// The default value after `=`.
-    pub default: Option<Expr<'a>>,
+    pub default: Option<Expression<'a>>,
     /// A custom completer after `@` in the type.
     pub completer: Option<Spanned<&'a str>>,
     /// The `# description` comments following the parameter, in source order
@@ -1304,12 +1313,12 @@ pub struct Param<'a> {
 /// The kinds of parameter.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub enum ParamKind<'a> {
-    /// `name` or `name?`.
-    Positional {
-        /// `true` for `name?`.
-        optional: bool,
-    },
+pub enum ParameterKind<'a> {
+    /// `name`: a positional parameter written without `?`. It may still have
+    /// a default value, which nu-parser counts as optional.
+    Required,
+    /// `name?`: an optional positional parameter.
+    Optional,
     /// `...rest`.
     Rest,
     /// `--long`, `--long(-s)`, or `-s`.
@@ -1324,7 +1333,7 @@ pub enum ParamKind<'a> {
 /// One `input -> output` type pair.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub struct IoType<'a> {
+pub struct InputOutputType<'a> {
     /// The input type.
     pub input: TypeAnnotation<'a>,
     /// The span of the `->`.
@@ -1340,11 +1349,11 @@ pub struct Signature<'a> {
     /// The span of the parameter list including its delimiters (`[...]`, `(...)` or `|...|`).
     pub span: Span,
     /// The parameters.
-    pub params: Vec<Param<'a>>,
+    pub params: Vec<Parameter<'a>>,
     /// The input/output types after `: `.
-    pub io_types: Vec<IoType<'a>>,
+    pub input_output_types: Vec<InputOutputType<'a>>,
     /// The span of the input/output type annotation, if present.
-    pub io_span: Option<Span>,
+    pub input_output_span: Option<Span>,
 }
 
 /// `let`, `mut` or `const`.
@@ -1409,23 +1418,23 @@ pub struct Alias<'a> {
     pub eq: Span,
     /// The aliased command. `None` only for `export alias x =`, which nu
     /// accepts through a quirk of its length check (`alias x =` is an error).
-    pub value: Option<Box<Expr<'a>>>,
+    pub value: Option<Box<Expression<'a>>>,
 }
 
 /// A member selector in a `use` statement.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub struct UseMember<'a> {
+pub struct ImportPatternMember<'a> {
     /// Where.
     pub span: Span,
     /// What.
-    pub kind: UseMemberKind<'a>,
+    pub kind: ImportPatternMemberKind<'a>,
 }
 
 /// The kinds of `use` member selector.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub enum UseMemberKind<'a> {
+pub enum ImportPatternMemberKind<'a> {
     /// A single name (submodule or definition).
     Name(Cow<'a, str>),
     /// `*`.
@@ -1435,7 +1444,7 @@ pub enum UseMemberKind<'a> {
     /// A member nu-parser parses and then ignores: a variable, a
     /// subexpression or a record (`use std $x`, `use std (foo)`), or anything
     /// at all after `use null`.
-    Ignored(Box<Expr<'a>>),
+    Ignored(Box<Expression<'a>>),
 }
 
 /// `use module members`.
@@ -1443,9 +1452,9 @@ pub enum UseMemberKind<'a> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Use<'a> {
     /// The module name or path (a string literal, or `null`).
-    pub module: Box<Expr<'a>>,
+    pub module: Box<Expression<'a>>,
     /// The members to import.
-    pub members: Vec<UseMember<'a>>,
+    pub members: Vec<ImportPatternMember<'a>>,
 }
 
 /// `module name { ... }` or `module path`.
@@ -1453,7 +1462,7 @@ pub struct Use<'a> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Module<'a> {
     /// The module name or path.
-    pub name: Box<Expr<'a>>,
+    pub name: Box<Expression<'a>>,
     /// The body, if inline.
     pub body: Option<Block<'a>>,
 }
@@ -1463,7 +1472,7 @@ pub struct Module<'a> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Export<'a> {
     /// The exported definition.
-    pub item: Box<Expr<'a>>,
+    pub item: Box<Expression<'a>>,
 }
 
 /// `export-env { ... }`.
@@ -1481,7 +1490,7 @@ pub struct Else<'a> {
     /// The `else` keyword span.
     pub keyword: Span,
     /// A block, or an expression (an `if` for `else if`).
-    pub body: Box<Expr<'a>>,
+    pub body: Box<Expression<'a>>,
 }
 
 /// `if`.
@@ -1489,7 +1498,7 @@ pub struct Else<'a> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct If<'a> {
     /// The condition.
-    pub condition: Box<Expr<'a>>,
+    pub condition: Box<Expression<'a>>,
     /// The then block.
     pub then_block: Block<'a>,
     /// The else branch.
@@ -1503,13 +1512,13 @@ pub struct MatchArm<'a> {
     /// From the pattern to the body.
     pub span: Span,
     /// The pattern.
-    pub pattern: Pattern<'a>,
+    pub pattern: MatchPattern<'a>,
     /// The `if` guard.
-    pub guard: Option<Box<Expr<'a>>>,
+    pub guard: Option<Box<Expression<'a>>>,
     /// The span of the `=>`.
     pub arrow: Span,
     /// The body: a block or a single expression.
-    pub body: Expr<'a>,
+    pub body: Expression<'a>,
 }
 
 /// `match`.
@@ -1517,7 +1526,7 @@ pub struct MatchArm<'a> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Match<'a> {
     /// The scrutinee.
-    pub value: Box<Expr<'a>>,
+    pub value: Box<Expression<'a>>,
     /// The span of the `{ ... }`.
     pub block_span: Span,
     /// The arms.
@@ -1525,37 +1534,39 @@ pub struct Match<'a> {
     /// The `{ ... }` when it is a closure or a record rather than arms
     /// (`match 1 {|x| }`, `match 1 {a: 1}`): nu-parser accepts it as a value
     /// and the match fails at run time. `arms` is empty then.
-    pub value_block: Option<Box<Expr<'a>>>,
+    pub value_block: Option<Box<Expression<'a>>>,
 }
 
 /// A match pattern.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub struct Pattern<'a> {
+pub struct MatchPattern<'a> {
     /// Where.
     pub span: Span,
     /// What.
-    pub kind: PatternKind<'a>,
+    pub pattern: Pattern<'a>,
 }
 
 /// The kinds of match pattern.
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub enum PatternKind<'a> {
+pub enum Pattern<'a> {
     /// A literal or constant expression (`1`, `"a"`, `1..3`, `(1 + 1)`).
-    Value(Expr<'a>),
+    Expression(Box<Expression<'a>>),
     /// `$name`: bind the value.
     Variable(&'a str),
-    /// `_`.
-    Wildcard,
+    /// `_`: match anything without binding it.
+    IgnoreValue,
     /// `[p1, p2, ..$rest]`.
-    List(Vec<Pattern<'a>>),
+    List(Vec<MatchPattern<'a>>),
     /// `{key: pattern, $shorthand}`.
-    Record(Vec<(Spanned<Cow<'a, str>>, Pattern<'a>)>),
-    /// `..$rest` or `..` inside a list pattern.
-    Rest(Option<Spanned<&'a str>>),
+    Record(Vec<(Spanned<Cow<'a, str>>, MatchPattern<'a>)>),
+    /// `..$rest` inside a list pattern: bind the remaining items.
+    Rest(Spanned<&'a str>),
+    /// `..` inside a list pattern: ignore the remaining items.
+    IgnoreRest,
     /// `p1 | p2`.
-    Or(Vec<Pattern<'a>>),
+    Or(Vec<MatchPattern<'a>>),
 }
 
 /// `for`.
@@ -1569,7 +1580,7 @@ pub struct For<'a> {
     /// The span of `in`.
     pub in_keyword: Span,
     /// What to iterate.
-    pub iterable: Box<Expr<'a>>,
+    pub iterable: Box<Expression<'a>>,
     /// The body.
     pub body: Block<'a>,
 }
@@ -1579,7 +1590,7 @@ pub struct For<'a> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct While<'a> {
     /// The condition.
-    pub condition: Box<Expr<'a>>,
+    pub condition: Box<Expression<'a>>,
     /// The body.
     pub body: Block<'a>,
 }
@@ -1597,7 +1608,7 @@ pub struct Loop<'a> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Return<'a> {
     /// The returned value.
-    pub value: Option<Box<Expr<'a>>>,
+    pub value: Option<Box<Expression<'a>>>,
 }
 
 /// The kind of a `try` handler.
@@ -1619,7 +1630,7 @@ pub struct Handler<'a> {
     /// The keyword span.
     pub keyword: Span,
     /// The handler: a closure literal or an expression evaluating to one.
-    pub body: Box<Expr<'a>>,
+    pub body: Box<Expression<'a>>,
 }
 
 /// `try`.
@@ -1651,5 +1662,5 @@ impl<'a> Try<'a> {
 pub struct Where<'a> {
     /// A closure, or a row condition in which bare column names are cell paths
     /// on the implicit `$it`.
-    pub condition: Box<Expr<'a>>,
+    pub condition: Box<Expression<'a>>,
 }

@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
-use nu_winnow_parser::ast::{Ast, ExprKind, Visitor};
+use nu_winnow_parser::ast::{Ast, Expr, Visitor};
 use nu_winnow_parser::{ParseConfig, parse_lenient, pretty};
 
 #[derive(Default)]
@@ -117,19 +117,19 @@ fn report(source: &str, name: &str, config: &ParseConfig, opts: &Options) -> Exi
 /// signatures (`sig` for `def`/`extern`, `closure-sig` for closure parameters)
 /// so that consumers can group the rows inside them.
 fn print_flat(ast: &Ast<'_>) {
-    use nu_winnow_parser::ast::{Expr, Signature};
+    use nu_winnow_parser::ast::{Expression, Signature};
     for (span, shape) in nu_winnow_parser::flatten::flatten(ast) {
         println!("{}\t{}\t{:?}", span.start, span.end, shape);
     }
     struct Sigs(Vec<(usize, usize, &'static str)>);
     impl<'a> Visitor<'a> for Sigs {
-        fn visit_expr(&mut self, e: &Expr<'a>) {
-            if let ExprKind::Closure(c) = &e.kind
+        fn visit_expression(&mut self, e: &Expression<'a>) {
+            if let Expr::Closure(c) = &e.expr
                 && let Some(sig) = &c.params
             {
                 self.0.push((sig.span.start, sig.span.end, "closure-sig"));
             }
-            nu_winnow_parser::ast::walk_expr(self, e);
+            nu_winnow_parser::ast::walk_expression(self, e);
         }
         fn visit_signature(&mut self, sig: &Signature<'a>) {
             if !self.0.iter().any(|(s, _, _)| *s == sig.span.start) {
@@ -224,10 +224,10 @@ impl<'a> Visitor<'a> for Stats {
         nu_winnow_parser::ast::walk_pipeline(self, pipeline);
     }
 
-    fn visit_expr(&mut self, expr: &nu_winnow_parser::ast::Expr<'a>) {
-        if !matches!(expr.kind, ExprKind::Garbage) {
+    fn visit_expression(&mut self, expr: &nu_winnow_parser::ast::Expression<'a>) {
+        if !matches!(expr.expr, Expr::Garbage) {
             self.exprs += 1;
         }
-        nu_winnow_parser::ast::walk_expr(self, expr);
+        nu_winnow_parser::ast::walk_expression(self, expr);
     }
 }

@@ -22,6 +22,18 @@ for most of the language, evaluating scripts through the real engine with
 results identical to `nu-parser`. The plan is to turn that demonstration into
 the real front end.
 
+The crate is written to be read next to nu-parser. `src/lex.rs` and the files
+of `src/parser/` are named after nu-parser's (`lite_parser.rs`,
+`parse_pipelines.rs`, `parse_expressions.rs`, `parse_calls.rs`,
+`parse_def.rs`, ...) and hold functions with nu-parser's names
+(`parse_block`, `parse_value`, `parse_call`, `find_longest_decl`,
+`parse_def_predecl`, ...). The state every parser function shares is a
+`WorkingSet` with `StateWorkingSet`'s method names, passed as `working_set`
+like nu-parser's, and the AST uses nu-protocol's type names (`Expression` and
+`Expr`, `Call`, `Argument`, `PipelineRedirection`, `MatchPattern`,
+`SyntaxShape`). Much of the port can therefore be reviewed as "this function
+replaces its namesake".
+
 ## Target architecture
 
 ```text
@@ -58,7 +70,7 @@ formatter, highlighters) can use without an engine.
   Nushell workspace (via other crates); the parser crate adds nothing else.
 * **Keep `nu-protocol` stable.** The lowered output is the existing
   `Block`/`Expression`/`Call`; spans and `SpanId`s are produced exactly as
-  today (`Expression::new` through the working set).
+  today (nu-protocol's `Expression::new`, which takes the working set).
 
 ## Steps
 
@@ -71,9 +83,20 @@ formatter, highlighters) can use without an engine.
   tests that require the `nu` binary, so contributors can run them locally
   (`tools/scripts/*.nu` already work this way).
 * Generate `builtin_commands.rs` at build time from the engine's declarations
-  instead of from `help commands`, or drop it: inside Nushell the working
-  set answers `is_known_command`, so the parser should take a trait object
-  (`&dyn CommandNames`) rather than a static table. Add that trait now:
+  instead of from `help commands`, or drop it: inside Nushell the engine's
+  `StateWorkingSet` knows every command. This crate's `WorkingSet` already
+  plays that part. Its methods carry `StateWorkingSet`'s names
+  (`get_span_contents`, `error`, `find_decl`, `add_predecl`, `enter_scope`,
+  `exit_scope`) and the parser calls them at the corresponding points:
+  `parse_def_predecl` at the start of every block, as nu's `parse_block`
+  does, and `enter_scope`/`exit_scope` around each nested block,
+  subexpression, closure and module body (nu-parser enters a scope in more
+  places, because it also tracks variables). The only thing it takes from outside is the table of known
+  commands: `WorkingSet::find_decl` and `WorkingSet::is_decl_name_prefix`
+  combine the names declared in the file with what the `ParseConfig` knows
+  (`ParseConfig::is_known`, `ParseConfig::is_prefix`). That table should be a
+  trait object (`&dyn CommandNames`) rather than a static set. Add that trait
+  now:
 
 ```rust,ignore
 pub trait CommandNames {
@@ -83,12 +106,19 @@ pub trait CommandNames {
 ```
 
 `ParseConfig` implements it for the standalone use; `StateWorkingSet` gets an
-implementation in nu-parser.
+implementation in nu-parser (`is_known` is `find_decl(name.as_bytes()).is_some()`).
+The two working sets differ in their signatures where the engine needs more
+(`StateWorkingSet` works on `&[u8]`, its `find_decl` returns a `DeclId`
+rather than a `DeclKind`, its `add_predecl` takes a `Box<dyn Command>`), not
+in what the parser asks of them.
 
 ### Step 1 — Lowering module in `nu-parser` (behind the feature)
 
 Port `bridge.rs` into `nu-parser` as `lower.rs`, replacing its shortcuts with
-the real machinery it was standing in for:
+the real machinery it was standing in for. Because both ASTs use the same
+type names, most of the lowering maps a node to its namesake; the code tells
+them apart by path (the bridge imports this crate's AST as `w`, so
+`w::Expr::Call` becomes an `Expr::Call`).
 
 | Bridge shortcut | Real implementation |
 | --- | --- |
@@ -98,15 +128,16 @@ the real machinery it was standing in for:
 | `let`/`mut` only | `const` via `eval_constant`; `export const` |
 | No modules | `parse_module`, `parse_use`, `parse_export_in_module`, `parse_overlay_*`, `parse_source`, `parse_hide` become functions over the syntactic `Use`/`Module`/`Export` nodes instead of over spans; their bodies (module registration, import patterns, overlay stacks) do not depend on lexing and move unchanged |
 | No attributes | attribute values via `eval_constant`, then `parse_def`'s existing attribute handling |
-| No redirections | `PipelineRedirection` from the syntactic `Redirection` (a direct mapping) |
-| No env shorthand | the `with-env` wrapping in `parse_expression` (`shorthand`), a direct mapping |
+| No redirections | nu-protocol's `PipelineRedirection` from the syntactic `PipelineRedirection` (a direct mapping) |
+| No env shorthand | the `with-env` wrapping in `parse_expression` (`shorthand`), a direct mapping from the syntactic `EnvShorthand` |
 | Captures computed by hand | `discover_captures_in_closure` and `compile_block`, unchanged |
 | Type `Any` everywhere | `math_result_type`/`type_compatible` calls at the same points `nu-parser` makes them today |
 
 Signature-driven decisions the syntactic tree leaves open are resolved here,
 and only here:
 
-* `--flag value` → named argument with value, using `Flag::arg`;
+* `--flag value` (a syntactic `Argument::Named` followed by a positional) →
+  named argument with value, using the signature's `Flag::arg`;
 * a bare word in a `CellPath`, `Filepath`, `GlobPattern`, `Directory`,
   `Int`, ... position → the typed expression (`SyntaxShape` dispatch);
 * `{ ... }` in a `Block` position → block instead of closure (the tree already
@@ -124,6 +155,9 @@ comparison test that parses each fixture both ways and compares the
 `nu-parser` produces `ParseError` variants with specific spans, and many
 tests (and the LSP) depend on them. Map `Diagnostic` to `ParseError`:
 
+* This crate's `ParseError` is only the list of `Diagnostic`s; the mapping
+  goes from each diagnostic's `ErrorKind` to a variant of nu-protocol's
+  `ParseError` enum.
 * `ErrorKind::Unclosed` → `ParseError::Unclosed`, `Unbalanced` → `Unbalanced`,
   `ShellSyntax` → `ShellAndAnd`/`ShellErrRedirect`/..., `ExtraTokens` →
   `ExtraTokens`/`ExtraTokensAfterClosingDelimiter`, `Expected` →
@@ -135,9 +169,10 @@ tests (and the LSP) depend on them. Map `Diagnostic` to `ParseError`:
   and the LSP rely on partial trees for the line being edited, so the
   syntactic parser needs *expression-level* garbage in the two places that
   matter for editing: an incomplete last argument and an unclosed delimiter
-  at end of input. Both are local changes in `value.rs`/`expr.rs` (return a
-  `Garbage` node instead of cutting when the lexer reported "unclosed at end
-  of input").
+  at end of input. Both are local changes in `parse_expressions.rs`
+  (`parse_value`) and `parse_calls.rs` (`parse_call_arguments`): return an
+  `Expr::Garbage` node (`garbage(span)` in `parse_helpers.rs`) instead of
+  cutting when the lexer reported "unclosed at end of input".
 
 Deliverable: Nushell's parser tests pass with the feature on, with an
 allow-list of tests whose exact error wording changed, reviewed one by one.
@@ -160,9 +195,12 @@ step so the benefit is visible:
 * Delete `lex.rs`, `lite_parser.rs`, `parse_literals.rs`,
   `parse_expressions.rs`, the lexing halves of `parse_calls.rs`,
   `parse_def.rs`, `parse_module.rs`, `parse_patterns.rs`,
-  `parse_signatures.rs`, `parse_shape_specs.rs`. What remains of `nu-parser`
-  is name resolution, signature application, type checking, const evaluation
-  and IR compilation: the engine-facing half.
+  `parse_signatures.rs`, `parse_shape_specs.rs`. Each has a namesake in this
+  crate (`src/lex.rs`, `src/parser/lite_parser.rs`,
+  `src/parser/parse_literals.rs`, ...) holding functions of the same names,
+  so the deletion can be reviewed file by file against what replaces
+  it. What remains of `nu-parser` is name resolution, signature application,
+  type checking, const evaluation and IR compilation: the engine-facing half.
 * Move the syntactic crate's fuzz/corpus comparison into Nushell's CI.
 
 ## Risks and how the plan handles them

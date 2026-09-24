@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 
 use nu_protocol::ParseError;
 use nu_protocol::engine::{EngineState, StateWorkingSet};
-use nu_winnow_parser::lexer::{LexOptions, TokenKind, lex};
+use nu_winnow_parser::lex::{LexOptions, TokenContents, lex};
 use nu_winnow_parser::{ParseConfig, parse_lenient};
 use serde::Deserialize;
 
@@ -258,7 +258,7 @@ impl Rng {
 /// words when the text does not lex.
 fn token_spans(text: &str) -> Vec<(usize, usize)> {
     match lex(text, 0, LexOptions::BLOCK) {
-        Ok(tokens) => tokens.iter().filter(|t| t.kind != TokenKind::Eof).map(|t| (t.span.start, t.span.end)).collect(),
+        Ok(tokens) => tokens.iter().filter(|t| t.contents != TokenContents::Eof).map(|t| (t.span.start, t.span.end)).collect(),
         Err(_) => text
             .split_whitespace()
             .map(|w| {

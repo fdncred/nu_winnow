@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 
 use nu_winnow_parser::ast::*;
-use nu_winnow_parser::lexer::{LexOptions, RedirectOp, TokenKind, lex};
+use nu_winnow_parser::lex::{LexOptions, RedirectionOperator, TokenContents, lex};
 use nu_winnow_parser::{ErrorKind, ParseConfig, Span, parse, parse_lenient};
 use rstest::rstest;
 
@@ -34,37 +34,37 @@ fn err_text(src: &str) -> String {
 }
 
 /// The expression of the last pipeline element of a one-pipeline source.
-fn last_expr<'a>(ast: &'a Ast<'a>) -> &'a Expr<'a> {
+fn last_expr<'a>(ast: &'a Ast<'a>) -> &'a Expression<'a> {
     let p = ast.block.pipelines.last().expect("a pipeline");
     &p.elements.last().expect("an element").expr
 }
 
 /// The right-most operand of a binary operation, or the expression itself
 /// (the shape nu's `compare_rhs_binary_op` looks at).
-fn rhs<'a>(e: &'a Expr<'a>) -> &'a Expr<'a> {
-    match &e.kind {
-        ExprKind::BinaryOp(b) => rhs(&b.rhs),
+fn rhs<'a>(e: &'a Expression<'a>) -> &'a Expression<'a> {
+    match &e.expr {
+        Expr::BinaryOp(b) => rhs(&b.rhs),
         _ => e,
     }
 }
 
-fn string_value(e: &Expr<'_>) -> (String, Quote) {
-    match &e.kind {
-        ExprKind::String(s) => (s.value.to_string(), s.quote),
+fn string_value(e: &Expression<'_>) -> (String, Quote) {
+    match &e.expr {
+        Expr::String(s) => (s.value.to_string(), s.quote),
         other => panic!("expected a string, got {other:?}"),
     }
 }
 
 /// A one-letter summary of each interpolation part: `T` text, `E` expression.
-fn interp_shape(e: &Expr<'_>) -> (Quote, Vec<String>) {
-    match &e.kind {
-        ExprKind::Interpolation(i) => (
+fn interp_shape(e: &Expression<'_>) -> (Quote, Vec<String>) {
+    match &e.expr {
+        Expr::StringInterpolation(i) => (
             i.quote,
             i.parts
                 .iter()
                 .map(|p| match p {
-                    InterpPart::Text { value, .. } => format!("T:{value}"),
-                    InterpPart::Expr(_) => "E".to_string(),
+                    InterpolationPart::Text { value, .. } => format!("T:{value}"),
+                    InterpolationPart::Expression(_) => "E".to_string(),
                 })
                 .collect(),
         ),
@@ -73,11 +73,11 @@ fn interp_shape(e: &Expr<'_>) -> (Quote, Vec<String>) {
 }
 
 /// Render an expression as a fully parenthesised string, to pin precedence.
-fn sexpr(src: &str, e: &Expr<'_>) -> String {
-    match &e.kind {
-        ExprKind::BinaryOp(b) => format!("({} {} {})", sexpr(src, &b.lhs), b.op.item, sexpr(src, &b.rhs)),
-        ExprKind::UnaryNot(n) => format!("(not {})", sexpr(src, &n.expr)),
-        ExprKind::Subexpression(b) => {
+fn sexpr(src: &str, e: &Expression<'_>) -> String {
+    match &e.expr {
+        Expr::BinaryOp(b) => format!("({} {} {})", sexpr(src, &b.lhs), b.op.item, sexpr(src, &b.rhs)),
+        Expr::UnaryNot(n) => format!("(not {})", sexpr(src, &n.expr)),
+        Expr::Subexpression(b) => {
             let inner = &b.pipelines[0].elements[0].expr;
             sexpr(src, inner)
         }
@@ -105,8 +105,8 @@ fn sexpr(src: &str, e: &Expr<'_>) -> String {
 #[case("0x42b", 1067)]
 fn ints(#[case] src: &str, #[case] expected: i64) {
     let ast = ok(src);
-    match &rhs(last_expr(&ast)).kind {
-        ExprKind::Int(i) => assert_eq!(*i, expected, "{src}"),
+    match &rhs(last_expr(&ast)).expr {
+        Expr::Int(i) => assert_eq!(*i, expected, "{src}"),
         other => panic!("{src}: expected Int, got {other:?}"),
     }
 }
@@ -130,9 +130,9 @@ fn radix_prefixed_words_must_be_ints(#[case] src: &str, #[case] message: &str) {
 #[case(".5", 0.5)]
 fn floats(#[case] src: &str, #[case] expected: f64) {
     let ast = ok(src);
-    match &rhs(last_expr(&ast)).kind {
-        ExprKind::Float(f) => assert_eq!(*f, expected, "{src}"),
-        ExprKind::Int(i) => assert_eq!(*i as f64, expected, "{src}"),
+    match &rhs(last_expr(&ast)).expr {
+        Expr::Float(f) => assert_eq!(*f, expected, "{src}"),
+        Expr::Int(i) => assert_eq!(*i as f64, expected, "{src}"),
         other => panic!("{src}: expected Float, got {other:?}"),
     }
 }
@@ -147,20 +147,20 @@ fn floats(#[case] src: &str, #[case] expected: f64) {
 fn number_like_strings(#[case] src: &str, #[case] expected: &str) {
     let ast = ok(src);
     let e = last_expr(&ast);
-    let value = match &e.kind {
-        ExprKind::Call(c) => string_value(c.positionals().next().expect("an argument")).0,
+    let value = match &e.expr {
+        Expr::Call(c) => string_value(c.positional_iter().next().expect("an argument")).0,
         _ => string_value(e).0,
     };
     assert_eq!(value, expected);
 }
 
-/// `./a/b` is an external command in nu (`Expr::GlobPattern` head); here it is
+/// `./a/b` is an external command in nu (`Expression::GlobPattern` head); here it is
 /// a `Call` whose head is the word, since externals are a signature question.
 #[test]
 fn relative_path_is_a_command_head() {
     let ast = ok("./a/b");
-    match &last_expr(&ast).kind {
-        ExprKind::Call(c) => assert_eq!(c.head.name, "./a/b"),
+    match &last_expr(&ast).expr {
+        Expr::Call(c) => assert_eq!(c.head.name, "./a/b"),
         other => panic!("{other:?}"),
     }
 }
@@ -173,8 +173,8 @@ fn relative_path_is_a_command_head() {
 #[case("1KiB", FilesizeUnit::KiB, 1_024)]
 fn filesizes(#[case] src: &str, #[case] unit: FilesizeUnit, #[case] bytes: i64) {
     let ast = ok(src);
-    match &last_expr(&ast).kind {
-        ExprKind::Filesize(f) => {
+    match &last_expr(&ast).expr {
+        Expr::Filesize(f) => {
             assert_eq!(f.unit, unit);
             assert_eq!(f.to_bytes(), Some(bytes));
         }
@@ -190,8 +190,8 @@ fn filesizes(#[case] src: &str, #[case] unit: FilesizeUnit, #[case] bytes: i64) 
 #[case("1\u{00B5}s", DurationUnit::Microsecond, 1_000)]
 fn durations(#[case] src: &str, #[case] unit: DurationUnit, #[case] nanoseconds: i64) {
     let ast = ok(src);
-    match &last_expr(&ast).kind {
-        ExprKind::Duration(d) => {
+    match &last_expr(&ast).expr {
+        Expr::Duration(d) => {
             assert_eq!(d.unit, unit);
             assert_eq!(d.to_nanoseconds(), Some(nanoseconds));
         }
@@ -218,8 +218,8 @@ fn unit_suffix_with_a_bad_number_is_an_error(#[case] src: &str, #[case] kind: &s
 #[case("0x[]", &[])]
 fn binary_literals(#[case] src: &str, #[case] bytes: &[u8]) {
     let ast = ok(src);
-    match &last_expr(&ast).kind {
-        ExprKind::Binary(b) => assert_eq!(b.bytes, bytes),
+    match &last_expr(&ast).expr {
+        Expr::Binary(b) => assert_eq!(b.bytes, bytes),
         other => panic!("{src}: {other:?}"),
     }
 }
@@ -288,8 +288,8 @@ fn trailing_backslash_is_an_unclosed_quote() {
 #[case(r#"$"a()b""#, Quote::Double, &["T:a", "E", "T:b"])]
 fn interpolation_parts(#[case] src: &str, #[case] quote: Quote, #[case] parts: &[&str]) {
     let ast = ok(src);
-    let e = match &last_expr(&ast).kind {
-        ExprKind::Call(c) => c.positionals().next().expect("an argument"),
+    let e = match &last_expr(&ast).expr {
+        Expr::Call(c) => c.positional_iter().next().expect("an argument"),
         _ => rhs(last_expr(&ast)),
     };
     let (q, shape) = interp_shape(e);
@@ -303,8 +303,8 @@ fn interpolation_parts(#[case] src: &str, #[case] quote: Quote, #[case] parts: &
 #[test]
 fn interpolated_bare_word_at_pipeline_head_is_a_call() {
     let ast = ok("~/.foo/(1)");
-    match &last_expr(&ast).kind {
-        ExprKind::Call(c) => assert_eq!(c.head.name, "~/.foo/(1)"),
+    match &last_expr(&ast).expr {
+        Expr::Call(c) => assert_eq!(c.head.name, "~/.foo/(1)"),
         other => panic!("{other:?}"),
     }
 }
@@ -312,9 +312,9 @@ fn interpolated_bare_word_at_pipeline_head_is_a_call() {
 #[test]
 fn interpolation_in_external_argument() {
     let ast = ok("^echo ($nu.home-path)/path");
-    match &last_expr(&ast).kind {
-        ExprKind::ExternalCall(c) => match &c.args[0] {
-            ExternalArg::Regular(e) => assert_eq!(interp_shape(e).1, ["E", "T:/path"]),
+    match &last_expr(&ast).expr {
+        Expr::ExternalCall(c) => match &c.arguments[0] {
+            ExternalArgument::Regular(e) => assert_eq!(interp_shape(e).1, ["E", "T:/path"]),
             other => panic!("{other:?}"),
         },
         other => panic!("{other:?}"),
@@ -348,10 +348,10 @@ fn unclosed_interpolation_subexpression_names_the_paren() {
 #[case(r##"^r#'foo\external-call'#"##, r"foo\external-call", Quote::Raw(1))]
 fn external_call_heads(#[case] src: &str, #[case] expected: &str, #[case] quote: Quote) {
     let ast = ok(src);
-    match &last_expr(&ast).kind {
-        ExprKind::ExternalCall(c) => {
+    match &last_expr(&ast).expr {
+        Expr::ExternalCall(c) => {
             assert_eq!(string_value(&c.head), (expected.to_string(), quote), "{src}");
-            assert!(c.args.is_empty());
+            assert!(c.arguments.is_empty());
         }
         other => panic!("{src}: {other:?}"),
     }
@@ -362,8 +362,8 @@ fn external_call_heads(#[case] src: &str, #[case] expected: &str, #[case] quote:
 #[case(r#"^$"~/.foo/(1)""#, 2, Quote::Double)]
 fn external_call_interpolated_heads(#[case] src: &str, #[case] parts: usize, #[case] quote: Quote) {
     let ast = ok(src);
-    match &last_expr(&ast).kind {
-        ExprKind::ExternalCall(c) => {
+    match &last_expr(&ast).expr {
+        Expr::ExternalCall(c) => {
             let (q, shape) = interp_shape(&c.head);
             assert_eq!((q, shape.len()), (quote, parts), "{src}");
         }
@@ -388,12 +388,12 @@ fn external_call_interpolated_heads(#[case] src: &str, #[case] parts: usize, #[c
 #[case("^foo 'q($x)'", "q($x)", Quote::Single)]
 fn external_call_string_args(#[case] src: &str, #[case] expected: &str, #[case] quote: Quote) {
     let ast = ok(src);
-    match &last_expr(&ast).kind {
-        ExprKind::ExternalCall(c) => {
+    match &last_expr(&ast).expr {
+        Expr::ExternalCall(c) => {
             assert_eq!(string_value(&c.head).0, "foo");
-            assert_eq!(c.args.len(), 1);
-            match &c.args[0] {
-                ExternalArg::Regular(e) => assert_eq!(string_value(e), (expected.to_string(), quote), "{src}"),
+            assert_eq!(c.arguments.len(), 1);
+            match &c.arguments[0] {
+                ExternalArgument::Regular(e) => assert_eq!(string_value(e), (expected.to_string(), quote), "{src}"),
                 other => panic!("{src}: {other:?}"),
             }
         }
@@ -407,9 +407,9 @@ fn external_call_string_args(#[case] src: &str, #[case] expected: &str, #[case] 
 #[case("^foo --out=(pwd)/x", 3, Quote::Bare)]
 fn external_call_interpolated_args(#[case] src: &str, #[case] parts: usize, #[case] quote: Quote) {
     let ast = ok(src);
-    match &last_expr(&ast).kind {
-        ExprKind::ExternalCall(c) => match &c.args[0] {
-            ExternalArg::Regular(e) => {
+    match &last_expr(&ast).expr {
+        Expr::ExternalCall(c) => match &c.arguments[0] {
+            ExternalArgument::Regular(e) => {
                 let (q, shape) = interp_shape(e);
                 assert_eq!((q, shape.len()), (quote, parts), "{src}");
             }
@@ -436,15 +436,15 @@ fn external_call_interpolated_args(#[case] src: &str, #[case] parts: usize, #[ca
 #[case("^foo (pwd)", "subexpression")]
 fn external_call_structured_args(#[case] src: &str, #[case] kind: &str) {
     let ast = ok(src);
-    match &last_expr(&ast).kind {
-        ExprKind::ExternalCall(c) => match &c.args[0] {
-            ExternalArg::Regular(e) => {
-                let actual = match &e.kind {
-                    ExprKind::Closure(_) => "closure",
-                    ExprKind::Record(_) => "record",
-                    ExprKind::List(_) => "list",
-                    ExprKind::Var(_) => "var",
-                    ExprKind::Subexpression(_) => "subexpression",
+    match &last_expr(&ast).expr {
+        Expr::ExternalCall(c) => match &c.arguments[0] {
+            ExternalArgument::Regular(e) => {
+                let actual = match &e.expr {
+                    Expr::Closure(_) => "closure",
+                    Expr::Record(_) => "record",
+                    Expr::List(_) => "list",
+                    Expr::Var(_) => "var",
+                    Expr::Subexpression(_) => "subexpression",
                     other => panic!("{src}: {other:?}"),
                 };
                 assert_eq!(actual, kind, "{src}");
@@ -458,10 +458,10 @@ fn external_call_structured_args(#[case] src: &str, #[case] kind: &str) {
 #[test]
 fn external_call_spread_argument() {
     let ast = ok("^foo ...[a b c]");
-    match &last_expr(&ast).kind {
-        ExprKind::ExternalCall(c) => match &c.args[0] {
-            ExternalArg::Spread { expr, .. } => match &expr.kind {
-                ExprKind::List(items) => assert_eq!(items.len(), 3),
+    match &last_expr(&ast).expr {
+        Expr::ExternalCall(c) => match &c.arguments[0] {
+            ExternalArgument::Spread { expr, .. } => match &expr.expr {
+                Expr::List(items) => assert_eq!(items.len(), 3),
                 other => panic!("{other:?}"),
             },
             other => panic!("{other:?}"),
@@ -479,10 +479,10 @@ fn external_call_spread_argument() {
 #[case("\" x \" | %str trim", "str trim", 0)]
 fn percent_sigil_calls(#[case] src: &str, #[case] name: &str, #[case] args: usize) {
     let ast = ok(src);
-    match &last_expr(&ast).kind {
-        ExprKind::Call(c) => {
+    match &last_expr(&ast).expr {
+        Expr::Call(c) => {
             assert_eq!(c.head.name, name, "{src}");
-            assert_eq!(c.args.len(), args, "{src}");
+            assert_eq!(c.arguments.len(), args, "{src}");
             assert_eq!(c.sigil.map(|s| s.slice(src)), Some("%"), "{src}");
         }
         other => panic!("{src}: {other:?}"),
@@ -497,16 +497,16 @@ fn percent_sigil_calls(#[case] src: &str, #[case] name: &str, #[case] args: usiz
 #[case("%$x.0", "cell path", 0)]
 fn percent_sigil_dynamic_calls(#[case] src: &str, #[case] head: &str, #[case] args: usize) {
     let ast = ok(src);
-    match &last_expr(&ast).kind {
-        ExprKind::DynamicCall(d) => {
-            let actual = match &d.head.kind {
-                ExprKind::Var(_) => "var",
-                ExprKind::Subexpression(_) => "subexpression",
-                ExprKind::FullCellPath(_) => "cell path",
+    match &last_expr(&ast).expr {
+        Expr::DynamicCall(d) => {
+            let actual = match &d.head.expr {
+                Expr::Var(_) => "var",
+                Expr::Subexpression(_) => "subexpression",
+                Expr::FullCellPath(_) => "cell path",
                 other => panic!("{src}: {other:?}"),
             };
             assert_eq!(actual, head, "{src}");
-            assert_eq!(d.args.len(), args, "{src}");
+            assert_eq!(d.arguments.len(), args, "{src}");
             assert_eq!(d.sigil.slice(src), "%");
         }
         other => panic!("{src}: {other:?}"),
@@ -538,11 +538,11 @@ fn percent_sigil_without_a_command_table_is_not_checked() {
 #[case("$foo.0.b?", &[("0", false), ("b", true)])]
 fn cell_path_members(#[case] src: &str, #[case] expected: &[(&str, bool)]) {
     let ast = ok(src);
-    match &last_expr(&ast).kind {
-        ExprKind::FullCellPath(p) => {
-            assert!(matches!(p.head.kind, ExprKind::Var(_)));
+    match &last_expr(&ast).expr {
+        Expr::FullCellPath(p) => {
+            assert!(matches!(p.head.expr, Expr::Var(_)));
             let members: Vec<(String, bool)> = p
-                .members
+                .tail
                 .iter()
                 .map(|m| {
                     let name = match &m.kind {
@@ -588,10 +588,10 @@ fn cell_path_members(#[case] src: &str, #[case] expected: &[(&str, bool)]) {
 #[case("1..(5)..10", true, true, true, RangeInclusion::Inclusive)]
 fn ranges(#[case] src: &str, #[case] from: bool, #[case] next: bool, #[case] to: bool, #[case] incl: RangeInclusion) {
     let ast = ok(src);
-    match &last_expr(&ast).kind {
-        ExprKind::Range(r) => {
+    match &last_expr(&ast).expr {
+        Expr::Range(r) => {
             assert_eq!(
-                (r.from.is_some(), r.next.is_some(), r.to.is_some(), r.inclusion),
+                (r.from.is_some(), r.next.is_some(), r.to.is_some(), r.operator.inclusion),
                 (from, next, to, incl),
                 "{src}"
             );
@@ -611,7 +611,7 @@ fn bad_ranges(#[case] src: &str) {
 fn ranges_do_not_swallow_unit_like_variable_names() {
     for src in ["let runs = 10; 1..$runs", "let sizekb = 10; 1..$sizekb"] {
         let ast = ok(src);
-        assert!(matches!(last_expr(&ast).kind, ExprKind::Range(_)), "{src}");
+        assert!(matches!(last_expr(&ast).expr, Expr::Range(_)), "{src}");
     }
 }
 
@@ -656,23 +656,25 @@ fn unknown_operators_get_help(#[case] src: &str, #[case] hint: &str) {
 // --- redirections (test_parser.rs: test_redirection_*) ---------------------------------------
 
 #[rstest]
-#[case("let a = 1 err> /dev/null", RedirectOp::Err)]
-#[case("let a = 1 out> /dev/null", RedirectOp::Out)]
-#[case("let a = 1 out+err> /dev/null", RedirectOp::OutErr)]
-#[case("mut a = 1 err> /dev/null", RedirectOp::Err)]
-#[case("mut a = 1 out> /dev/null", RedirectOp::Out)]
-#[case("mut a = 1 out+err> /dev/null", RedirectOp::OutErr)]
-fn redirection_inside_let_value(#[case] src: &str, #[case] op: RedirectOp) {
+#[case("let a = 1 err> /dev/null", RedirectionOperator::Err)]
+#[case("let a = 1 out> /dev/null", RedirectionOperator::Out)]
+#[case("let a = 1 out+err> /dev/null", RedirectionOperator::OutErr)]
+#[case("mut a = 1 err> /dev/null", RedirectionOperator::Err)]
+#[case("mut a = 1 out> /dev/null", RedirectionOperator::Out)]
+#[case("mut a = 1 out+err> /dev/null", RedirectionOperator::OutErr)]
+fn redirection_inside_let_value(#[case] src: &str, #[case] op: RedirectionOperator) {
     let ast = ok(src);
     let element = &ast.block.pipelines[0].elements[0];
     assert!(element.redirection.is_none(), "the redirection belongs to the value");
-    let binding = match &element.expr.kind {
-        ExprKind::Let(b) | ExprKind::Mut(b) => b,
+    let binding = match &element.expr.expr {
+        Expr::Let(b) | Expr::Mut(b) => b,
         other => panic!("{other:?}"),
     };
     let inner = &binding.value.as_ref().unwrap().pipelines[0].elements[0];
     match inner.redirection.as_ref().unwrap() {
-        Redirection::Single { target: RedirectTarget::File { op: actual, .. }, .. } => assert_eq!(actual.item, op),
+        PipelineRedirection::Single { target: RedirectionTarget::File { op: actual, .. }, .. } => {
+            assert_eq!(actual.item, op)
+        }
         other => panic!("{other:?}"),
     }
 }
@@ -729,8 +731,8 @@ fn comments_between_pipeline_elements(#[case] src: &str, #[case] elements: usize
 #[test]
 fn hash_without_preceding_space_is_not_a_comment() {
     let ast = ok("echo test#testing");
-    match &last_expr(&ast).kind {
-        ExprKind::Call(c) => assert_eq!(string_value(c.positionals().next().unwrap()).0, "test#testing"),
+    match &last_expr(&ast).expr {
+        Expr::Call(c) => assert_eq!(string_value(c.positional_iter().next().unwrap()).0, "test#testing"),
         other => panic!("{other:?}"),
     }
     assert!(ok("# command_bar_text: { fg: '#C4C9C6' },").block.pipelines.is_empty());
@@ -741,14 +743,14 @@ fn let_after_pipe_is_a_statement() {
     let ast = ok("ls | let files");
     let els = &ast.block.pipelines[0].elements;
     assert_eq!(els.len(), 2);
-    assert!(matches!(els[1].expr.kind, ExprKind::Let(_)));
+    assert!(matches!(els[1].expr.expr, Expr::Let(_)));
 }
 
 #[test]
 fn empty_braces_as_row_condition() {
     let ast = ok("[0 1 2] | where {}");
-    match &last_expr(&ast).kind {
-        ExprKind::Where(w) => assert!(matches!(w.condition.kind, ExprKind::Closure(_))),
+    match &last_expr(&ast).expr {
+        Expr::Where(w) => assert!(matches!(w.condition.expr, Expr::Closure(_))),
         other => panic!("{other:?}"),
     }
 }
@@ -756,9 +758,9 @@ fn empty_braces_as_row_condition() {
 #[test]
 fn datetime_in_record_value() {
     let ast = ok("{ a: 2024-07-23T22:54:54.532100627+02:00 b:xy }");
-    match &last_expr(&ast).kind {
-        ExprKind::Record(items) => match &items[0] {
-            RecordItem::Pair { value, .. } => assert!(matches!(value.kind, ExprKind::DateTime(_))),
+    match &last_expr(&ast).expr {
+        Expr::Record(items) => match &items[0] {
+            RecordItem::Pair { value, .. } => assert!(matches!(value.expr, Expr::DateTime(_))),
             other => panic!("{other:?}"),
         },
         other => panic!("{other:?}"),
@@ -790,21 +792,21 @@ fn confusing_records_are_refused(#[case] src: &str) {
 fn attribute_values() {
     // nu's test registers an `attr echo` command; here it is declared in the source.
     let ast = ok("def \"attr echo\" [x] { $x }\n@echo \"hello world\"\n@echo 42\ndef foo [] {}");
-    match &last_expr(&ast).kind {
-        ExprKind::AttributeBlock(a) => {
+    match &last_expr(&ast).expr {
+        Expr::AttributeBlock(a) => {
             assert_eq!(a.attributes.len(), 2);
             assert_eq!(a.attributes[0].name.item, "echo");
-            assert_eq!(string_value(a.attributes[0].args.first().map(arg_expr).unwrap()).0, "hello world");
-            assert!(matches!(arg_expr(&a.attributes[1].args[0]).kind, ExprKind::Int(42)));
-            assert!(matches!(a.item.kind, ExprKind::Def(_)));
+            assert_eq!(string_value(a.attributes[0].arguments.first().map(arg_expr).unwrap()).0, "hello world");
+            assert!(matches!(arg_expr(&a.attributes[1].arguments[0]).expr, Expr::Int(42)));
+            assert!(matches!(a.item.expr, Expr::Def(_)));
         }
         other => panic!("{other:?}"),
     }
 }
 
-fn arg_expr<'a>(arg: &'a Arg<'a>) -> &'a Expr<'a> {
+fn arg_expr<'a>(arg: &'a Argument<'a>) -> &'a Expression<'a> {
     match arg {
-        Arg::Positional(e) => e,
+        Argument::Positional(e) => e,
         other => panic!("{other:?}"),
     }
 }
@@ -829,7 +831,7 @@ fn arg_expr<'a>(arg: &'a Arg<'a>) -> &'a Expr<'a> {
 #[case("def foo [--verbose(-v), # my test flag\n ...rest: int # my rest comment\n] { }")]
 fn signature_forms_from_nushell_tests(#[case] src: &str) {
     let ast = ok(src);
-    assert!(matches!(last_expr(&ast).kind, ExprKind::Def(_) | ExprKind::Extern(_) | ExprKind::Export(_)));
+    assert!(matches!(last_expr(&ast).expr, Expr::Def(_) | Expr::Extern(_) | Expr::Export(_)));
 }
 
 /// `in`, `nu`, `env` and `ans` are built-in variables: a parameter, a `let`
@@ -852,17 +854,17 @@ fn reserved_variable_names_are_errors(#[case] src: &str) {
 }
 
 #[rstest]
-#[case("let a: int = 1", TypeKind::Int)]
-#[case("let a: string = 'qwe'", TypeKind::String)]
-#[case("let a: nothing = null", TypeKind::Nothing)]
-#[case("let a: list<string> = []", TypeKind::List(None))]
-#[case("let a: record<a: int b: int> = {a: 1 b: 1}", TypeKind::Record(Vec::new()))]
-#[case("let a: table<a: int b: int> = [[a b]; [1 2] [3 4]]", TypeKind::Table(Vec::new()))]
-fn let_type_annotations(#[case] src: &str, #[case] kind: TypeKind<'static>) {
+#[case("let a: int = 1", SyntaxShape::Int)]
+#[case("let a: string = 'qwe'", SyntaxShape::String)]
+#[case("let a: nothing = null", SyntaxShape::Nothing)]
+#[case("let a: list<string> = []", SyntaxShape::List(None))]
+#[case("let a: record<a: int b: int> = {a: 1 b: 1}", SyntaxShape::Record(Vec::new()))]
+#[case("let a: table<a: int b: int> = [[a b]; [1 2] [3 4]]", SyntaxShape::Table(Vec::new()))]
+fn let_type_annotations(#[case] src: &str, #[case] kind: SyntaxShape<'static>) {
     let ast = ok(src);
-    match &last_expr(&ast).kind {
-        ExprKind::Let(b) => {
-            let actual = &b.ty.as_ref().unwrap().kind;
+    match &last_expr(&ast).expr {
+        Expr::Let(b) => {
+            let actual = &b.ty.as_ref().unwrap().shape;
             assert_eq!(std::mem::discriminant(actual), std::mem::discriminant(&kind), "{src}: {actual:?}");
         }
         other => panic!("{other:?}"),
@@ -905,16 +907,16 @@ fn declaration_errors_from_nushell_tests(#[case] src: &str) {
 
 // --- the lexer (test_lex.rs) ---------------------------------------------------------------
 
-fn kinds_and_texts(src: &str, opts: LexOptions) -> Vec<(TokenKind, &str)> {
-    lex(src, 0, opts).unwrap().into_iter().map(|t| (t.kind, t.text(src))).collect()
+fn kinds_and_texts(src: &str, opts: LexOptions) -> Vec<(TokenContents, &str)> {
+    lex(src, 0, opts).unwrap().into_iter().map(|t| (t.contents, t.text(src))).collect()
 }
 
 #[test]
 fn lex_newline_and_semicolon() {
     let src = "let x = 300\nlet y = 500;";
     let toks = lex(src, 0, LexOptions::BLOCK).unwrap();
-    assert!(toks.iter().any(|t| t.kind == TokenKind::Eol && t.span == Span::new(11, 12)));
-    assert_eq!(toks[toks.len() - 2].kind, TokenKind::Semicolon);
+    assert!(toks.iter().any(|t| t.contents == TokenContents::Eol && t.span == Span::new(11, 12)));
+    assert_eq!(toks[toks.len() - 2].contents, TokenContents::Semicolon);
 }
 
 #[rstest]
@@ -945,35 +947,35 @@ fn lex_unterminated_type_annotations(#[case] src: &str, #[case] delimiter: &str)
 fn lex_empty_input_is_just_eof() {
     let toks = lex("", 0, LexOptions::BLOCK).unwrap();
     assert_eq!(toks.len(), 1);
-    assert_eq!(toks[0].kind, TokenKind::Eof);
+    assert_eq!(toks[0].contents, TokenContents::Eof);
 }
 
 #[test]
 fn lex_parenthesised_expression_is_one_item() {
     let toks = lex("let x = (300 + (322 * 444));", 0, LexOptions::BLOCK).unwrap();
-    assert_eq!((toks[3].kind, toks[3].span), (TokenKind::Item, Span::new(8, 27)));
+    assert_eq!((toks[3].contents, toks[3].span), (TokenContents::Item, Span::new(8, 27)));
 }
 
 #[test]
 fn lex_comment_spans() {
     let toks = lex("let x = 300 # a comment \n $x + 444", 0, LexOptions::BLOCK).unwrap();
-    assert_eq!((toks[4].kind, toks[4].span), (TokenKind::Comment, Span::new(12, 24)));
+    assert_eq!((toks[4].contents, toks[4].span), (TokenContents::Comment, Span::new(12, 24)));
 
     let src = "let z = 42 #the comment \n let x#y = 69 #hello \n let flk = nixpkgs#hello #hello";
     let toks = lex(src, 0, LexOptions::BLOCK).unwrap();
-    assert_eq!((toks[4].kind, toks[4].span), (TokenKind::Comment, Span::new(11, 24)));
-    assert_eq!((toks[7].kind, toks[7].span), (TokenKind::Item, Span::new(30, 33)));
-    assert_eq!((toks[10].kind, toks[10].span), (TokenKind::Comment, Span::new(39, 46)));
-    assert_eq!((toks[15].kind, toks[15].span), (TokenKind::Item, Span::new(58, 71)));
-    assert_eq!((toks[16].kind, toks[16].span), (TokenKind::Comment, Span::new(72, 78)));
+    assert_eq!((toks[4].contents, toks[4].span), (TokenContents::Comment, Span::new(11, 24)));
+    assert_eq!((toks[7].contents, toks[7].span), (TokenContents::Item, Span::new(30, 33)));
+    assert_eq!((toks[10].contents, toks[10].span), (TokenContents::Comment, Span::new(39, 46)));
+    assert_eq!((toks[15].contents, toks[15].span), (TokenContents::Item, Span::new(58, 71)));
+    assert_eq!((toks[16].contents, toks[16].span), (TokenContents::Comment, Span::new(72, 78)));
 
     // Comments keep the end-of-line token after them.
     let src = "let z = 4 #comment \n let x = 4 # comment\n let y = 1 # comment";
     let toks = lex(src, 0, LexOptions::BLOCK).unwrap();
-    assert_eq!((toks[4].kind, toks[4].span), (TokenKind::Comment, Span::new(10, 19)));
-    assert_eq!((toks[5].kind, toks[5].span), (TokenKind::Eol, Span::new(19, 20)));
-    assert_eq!((toks[10].kind, toks[10].span), (TokenKind::Comment, Span::new(31, 40)));
-    assert_eq!((toks[11].kind, toks[11].span), (TokenKind::Eol, Span::new(40, 41)));
+    assert_eq!((toks[4].contents, toks[4].span), (TokenContents::Comment, Span::new(10, 19)));
+    assert_eq!((toks[5].contents, toks[5].span), (TokenContents::Eol, Span::new(19, 20)));
+    assert_eq!((toks[10].contents, toks[10].span), (TokenContents::Comment, Span::new(31, 40)));
+    assert_eq!((toks[11].contents, toks[11].span), (TokenContents::Eol, Span::new(40, 41)));
 }
 
 #[test]
@@ -1038,7 +1040,7 @@ fn lex_mismatched_closers(#[case] src: &str, #[case] found: &str, #[case] expect
 #[case(r#"$'($"a" + $'b')'"#)]
 fn lex_interpolation_is_one_item(#[case] src: &str) {
     let toks = lex(src, 0, LexOptions::BLOCK).unwrap();
-    let items: Vec<_> = toks.iter().filter(|t| t.kind == TokenKind::Item).collect();
+    let items: Vec<_> = toks.iter().filter(|t| t.contents == TokenContents::Item).collect();
     assert_eq!(items.len(), 1, "{src}: {toks:?}");
     assert_eq!(items[0].span, Span::new(0, src.len()));
 }
@@ -1074,9 +1076,9 @@ fn lex_large_nested_record_completes() {
     src.push('}');
     assert!(lex(&src, 0, LexOptions::BLOCK).is_ok());
     let ast = ok(&src);
-    match &last_expr(&ast).kind {
-        ExprKind::Assignment(a) => match &a.rhs.pipelines[0].elements[0].expr.kind {
-            ExprKind::Record(items) => assert_eq!(items.len(), 2000),
+    match &last_expr(&ast).expr {
+        Expr::Assignment(a) => match &a.rhs.pipelines[0].elements[0].expr.expr {
+            Expr::Record(items) => assert_eq!(items.len(), 2000),
             other => panic!("{other:?}"),
         },
         other => panic!("{other:?}"),
@@ -1088,14 +1090,14 @@ fn deeply_nested_lists_do_not_blow_up() {
     let e = parse("[[[[[[[[[[[[[[[[[[[[[[[[[[[[").unwrap_err();
     assert!(matches!(e.primary().kind, ErrorKind::Unclosed { delimiter: "]", .. }));
     let ast = ok("[[[[[[[[[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]]]]]]]]]");
-    assert!(matches!(last_expr(&ast).kind, ExprKind::List(_)));
+    assert!(matches!(last_expr(&ast).expr, Expr::List(_)));
 }
 
 #[test]
 fn deeply_nested_modules_do_not_blow_up() {
     let src = "module foo { ".repeat(28) + "use bar.nu " + &"}".repeat(28);
     let ast = ok(&src);
-    assert!(matches!(last_expr(&ast).kind, ExprKind::Module(_)));
+    assert!(matches!(last_expr(&ast).expr, Expr::Module(_)));
 }
 
 // --- the crate's own corpus of Nushell repository samples -------------------------------------

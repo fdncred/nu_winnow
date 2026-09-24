@@ -46,7 +46,7 @@ use nu_protocol::{
     Signature, Span, Spanned, SyntaxShape, Type, Value, VarId,
 };
 use nu_winnow_parser::ast as w;
-use nu_winnow_parser::lexer::AssignOp;
+use nu_winnow_parser::lex::AssignmentOperator;
 
 type LResult<T> = Result<T, String>;
 
@@ -169,7 +169,7 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
             for p in &params.params {
                 let pspan = self.span(p.span);
                 let var_id = self.declare_var(p.name.item, pspan, false);
-                let shape = p.ty.as_ref().map_or(SyntaxShape::Any, |t| shape_of(&t.kind));
+                let shape = p.ty.as_ref().map_or(SyntaxShape::Any, |t| shape_of(&t.shape));
                 let default_value = match &p.default {
                     Some(d) => {
                         let e = self.expr(d)?;
@@ -178,7 +178,7 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                     None => None,
                 };
                 match &p.kind {
-                    w::ParamKind::Positional { optional } => {
+                    w::ParameterKind::Required | w::ParameterKind::Optional => {
                         let arg = PositionalArg {
                             name: p.name.item.to_string(),
                             desc: String::new(),
@@ -187,13 +187,13 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                             var_id: Some(var_id),
                             default_value,
                         };
-                        if *optional {
+                        if p.kind == w::ParameterKind::Optional {
                             sig.optional_positional.push(arg);
                         } else {
                             sig.required_positional.push(arg);
                         }
                     }
-                    w::ParamKind::Rest => {
+                    w::ParameterKind::Rest => {
                         sig.rest_positional = Some(PositionalArg {
                             name: p.name.item.to_string(),
                             desc: String::new(),
@@ -203,11 +203,11 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                             default_value,
                         });
                     }
-                    w::ParamKind::Flag { long, short } => {
+                    w::ParameterKind::Flag { long, short } => {
                         sig.named.push(Flag {
                             long: long.map(|l| l.item.to_string()).unwrap_or_default(),
                             short: short.map(|s| s.item),
-                            arg: p.ty.as_ref().map(|t| shape_of(&t.kind)),
+                            arg: p.ty.as_ref().map(|t| shape_of(&t.shape)),
                             required: false,
                             desc: String::new(),
                             completion: None,
@@ -240,32 +240,32 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
 
     // --- expressions ----------------------------------------------------------------------
 
-    fn expr(&mut self, e: &w::Expr<'a>) -> LResult<Expression> {
+    fn expr(&mut self, e: &w::Expression<'a>) -> LResult<Expression> {
         let span = self.span(e.span);
-        let (expr, ty) = match &e.kind {
-            w::ExprKind::Bool(b) => (Expr::Bool(*b), Type::Bool),
-            w::ExprKind::Nothing => (Expr::Nothing, Type::Nothing),
-            w::ExprKind::Int(i) => (Expr::Int(*i), Type::Int),
-            w::ExprKind::Float(f) => (Expr::Float(*f), Type::Float),
-            w::ExprKind::String(s) => match s.quote {
+        let (expr, ty) = match &e.expr {
+            w::Expr::Bool(b) => (Expr::Bool(*b), Type::Bool),
+            w::Expr::Nothing => (Expr::Nothing, Type::Nothing),
+            w::Expr::Int(i) => (Expr::Int(*i), Type::Int),
+            w::Expr::Float(f) => (Expr::Float(*f), Type::Float),
+            w::Expr::String(s) => match s.quote {
                 w::Quote::Raw(_) => (Expr::RawString(s.value.to_string()), Type::String),
                 _ => (Expr::String(s.value.to_string()), Type::String),
             },
-            w::ExprKind::Interpolation(i) => {
+            w::Expr::StringInterpolation(i) => {
                 let mut parts = Vec::with_capacity(i.parts.len());
                 for part in &i.parts {
                     parts.push(match part {
-                        w::InterpPart::Text { span, value } => {
+                        w::InterpolationPart::Text { span, value } => {
                             let sp = self.span(*span);
                             self.expression(Expr::String(value.to_string()), sp, Type::String)
                         }
-                        w::InterpPart::Expr(e) => self.expr(e)?,
+                        w::InterpolationPart::Expression(e) => self.expr(e)?,
                     });
                 }
                 (Expr::StringInterpolation(parts), Type::String)
             }
-            w::ExprKind::Binary(b) => (Expr::Binary(b.bytes.clone()), Type::Binary),
-            w::ExprKind::Duration(d) => {
+            w::Expr::Binary(b) => (Expr::Binary(b.bytes.clone()), Type::Binary),
+            w::Expr::Duration(d) => {
                 let ns = d.to_nanoseconds().ok_or("duration too large")?;
                 let inner = self.expression(Expr::Int(ns), span, Type::Int);
                 (
@@ -276,7 +276,7 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                     Type::Duration,
                 )
             }
-            w::ExprKind::Filesize(f) => {
+            w::Expr::Filesize(f) => {
                 let bytes = f.to_bytes().ok_or("filesize too large")?;
                 let inner = self.expression(Expr::Int(bytes), span, Type::Int);
                 (
@@ -287,38 +287,38 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                     Type::Filesize,
                 )
             }
-            w::ExprKind::DateTime(text) => {
+            w::Expr::DateTime(text) => {
                 let dt = chrono::DateTime::parse_from_rfc3339(text)
                     .or_else(|_| chrono::DateTime::parse_from_rfc3339(&format!("{text}T00:00:00+00:00")))
                     .or_else(|_| chrono::DateTime::parse_from_rfc3339(&format!("{text}+00:00")))
                     .map_err(|e| format!("invalid datetime `{text}`: {e}"))?;
                 (Expr::DateTime(dt), Type::Date)
             }
-            w::ExprKind::Range(r) => {
+            w::Expr::Range(r) => {
                 let from = r.from.as_ref().map(|e| self.expr(e)).transpose()?;
                 let next = r.next.as_ref().map(|e| self.expr(e)).transpose()?;
                 let to = r.to.as_ref().map(|e| self.expr(e)).transpose()?;
-                let inclusion = match r.inclusion {
+                let inclusion = match r.operator.inclusion {
                     w::RangeInclusion::Inclusive => RangeInclusion::Inclusive,
                     w::RangeInclusion::RightExclusive => RangeInclusion::RightExclusive,
                 };
                 let operator = RangeOperator {
                     inclusion,
-                    span: self.span(r.op_span),
-                    next_op_span: r.next_op_span.map_or(span, |s| self.span(s)),
+                    span: self.span(r.operator.span),
+                    next_op_span: r.operator.next_op_span.map_or(span, |s| self.span(s)),
                 };
                 (Expr::Range(Box::new(Range { from, next, to, operator })), Type::Range)
             }
-            w::ExprKind::Var(v) => (Expr::Var(self.resolve_var(v.name, span)?), Type::Any),
-            w::ExprKind::CellPath(c) => {
+            w::Expr::Var(v) => (Expr::Var(self.resolve_var(v.name, span)?), Type::Any),
+            w::Expr::CellPath(c) => {
                 (Expr::CellPath(CellPath { members: self.members(&c.members) }), Type::CellPath)
             }
-            w::ExprKind::FullCellPath(p) => {
+            w::Expr::FullCellPath(p) => {
                 let head = self.expr(&p.head)?;
-                let tail = self.members(&p.members);
+                let tail = self.members(&p.tail);
                 (Expr::FullCellPath(Box::new(FullCellPath { head, tail })), Type::Any)
             }
-            w::ExprKind::List(items) => {
+            w::Expr::List(items) => {
                 let mut out = Vec::with_capacity(items.len());
                 for item in items {
                     out.push(match item {
@@ -328,7 +328,7 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                 }
                 (Expr::List(out), Type::list(Type::Any))
             }
-            w::ExprKind::Table(t) => {
+            w::Expr::Table(t) => {
                 let columns = self.list_items(&t.columns)?;
                 let mut rows = Vec::with_capacity(t.rows.len());
                 for row in &t.rows {
@@ -339,7 +339,7 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                     Type::table(),
                 )
             }
-            w::ExprKind::Record(items) => {
+            w::Expr::Record(items) => {
                 let mut out = Vec::with_capacity(items.len());
                 for item in items {
                     out.push(match item {
@@ -349,20 +349,20 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                 }
                 (Expr::Record(out), Type::record())
             }
-            w::ExprKind::Closure(c) => {
+            w::Expr::Closure(c) => {
                 let (id, _) = self.closure_block(c.params.as_ref(), &c.body, span, "closure")?;
                 (Expr::Closure(id), Type::Closure)
             }
-            w::ExprKind::Block(b) => (Expr::Block(self.scoped_block(b, span, false)?), Type::Block),
-            w::ExprKind::Subexpression(b) => (Expr::Subexpression(self.scoped_block(b, span, false)?), Type::Any),
-            w::ExprKind::BinaryOp(b) => {
+            w::Expr::Block(b) => (Expr::Block(self.scoped_block(b, span, false)?), Type::Block),
+            w::Expr::Subexpression(b) => (Expr::Subexpression(self.scoped_block(b, span, false)?), Type::Any),
+            w::Expr::BinaryOp(b) => {
                 let lhs = self.expr(&b.lhs)?;
                 let op = self.expression(Expr::Operator(operator(b.op.item)), self.span(b.op.span), Type::Any);
                 let rhs = self.expr(&b.rhs)?;
                 (Expr::BinaryOp(Box::new(lhs), Box::new(op), Box::new(rhs)), Type::Any)
             }
-            w::ExprKind::UnaryNot(n) => (Expr::UnaryNot(Box::new(self.expr(&n.expr)?)), Type::Bool),
-            w::ExprKind::Assignment(a) => {
+            w::Expr::UnaryNot(n) => (Expr::UnaryNot(Box::new(self.expr(&n.expr)?)), Type::Bool),
+            w::Expr::Assignment(a) => {
                 let lhs = self.expr(&a.lhs)?;
                 let op = self.expression(
                     Expr::Operator(Operator::Assignment(assign_op(a.op.item))),
@@ -374,25 +374,25 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                 let rhs = self.expression(Expr::Subexpression(rhs_id), rhs_span, Type::Any);
                 (Expr::BinaryOp(Box::new(lhs), Box::new(op), Box::new(rhs)), Type::Nothing)
             }
-            w::ExprKind::Call(c) => return self.call(c, span),
-            w::ExprKind::ExternalCall(c) => {
+            w::Expr::Call(c) => return self.call(c, span),
+            w::Expr::ExternalCall(c) => {
                 let head = self.expr(&c.head)?;
-                let mut args = Vec::with_capacity(c.args.len());
-                for arg in &c.args {
+                let mut args = Vec::with_capacity(c.arguments.len());
+                for arg in &c.arguments {
                     args.push(match arg {
-                        w::ExternalArg::Regular(e) => ExternalArgument::Regular(self.expr(e)?),
-                        w::ExternalArg::Spread { expr, .. } => ExternalArgument::Spread(self.expr(expr)?),
+                        w::ExternalArgument::Regular(e) => ExternalArgument::Regular(self.expr(e)?),
+                        w::ExternalArgument::Spread { expr, .. } => ExternalArgument::Spread(self.expr(expr)?),
                     });
                 }
                 (Expr::ExternalCall(Box::new(head), args.into_boxed_slice()), Type::Any)
             }
-            w::ExprKind::Let(b) => return self.binding(b, "let", false, span),
-            w::ExprKind::Mut(b) => return self.binding(b, "mut", true, span),
-            w::ExprKind::Def(d) => return self.def(d, span),
-            w::ExprKind::If(i) => return self.if_expr(i, span),
-            w::ExprKind::Match(m) => return self.match_expr(m, span),
-            w::ExprKind::For(f) => return self.for_expr(f, span),
-            w::ExprKind::While(wh) => {
+            w::Expr::Let(b) => return self.binding(b, "let", false, span),
+            w::Expr::Mut(b) => return self.binding(b, "mut", true, span),
+            w::Expr::Def(d) => return self.def(d, span),
+            w::Expr::If(i) => return self.if_expr(i, span),
+            w::Expr::Match(m) => return self.match_expr(m, span),
+            w::Expr::For(f) => return self.for_expr(f, span),
+            w::Expr::While(wh) => {
                 let mut call = self.keyword_call("while", self.keyword_span(span, "while"))?;
                 let cond = self.expr(&wh.condition)?;
                 call.add_positional(cond);
@@ -402,7 +402,7 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                 call.add_positional(body);
                 (Expr::Call(Box::new(call)), Type::Nothing)
             }
-            w::ExprKind::Loop(l) => {
+            w::Expr::Loop(l) => {
                 let mut call = self.keyword_call("loop", self.keyword_span(span, "loop"))?;
                 let body_span = self.span(l.body.span);
                 let body = self.scoped_block(&l.body, body_span, false)?;
@@ -410,9 +410,9 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                 call.add_positional(body);
                 (Expr::Call(Box::new(call)), Type::Nothing)
             }
-            w::ExprKind::Break => (Expr::Call(Box::new(self.keyword_call("break", span)?)), Type::Nothing),
-            w::ExprKind::Continue => (Expr::Call(Box::new(self.keyword_call("continue", span)?)), Type::Nothing),
-            w::ExprKind::Return(r) => {
+            w::Expr::Break => (Expr::Call(Box::new(self.keyword_call("break", span)?)), Type::Nothing),
+            w::Expr::Continue => (Expr::Call(Box::new(self.keyword_call("continue", span)?)), Type::Nothing),
+            w::Expr::Return(r) => {
                 let mut call = self.keyword_call("return", self.keyword_span(span, "return"))?;
                 if let Some(v) = &r.value {
                     let v = self.expr(v)?;
@@ -420,7 +420,7 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                 }
                 (Expr::Call(Box::new(call)), Type::Nothing)
             }
-            w::ExprKind::Try(t) => {
+            w::Expr::Try(t) => {
                 let mut call = self.keyword_call("try", self.keyword_span(span, "try"))?;
                 let body_span = self.span(t.body.span);
                 let body = self.scoped_block(&t.body, body_span, false)?;
@@ -440,11 +440,11 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                 }
                 (Expr::Call(Box::new(call)), Type::Any)
             }
-            w::ExprKind::Where(wh) => {
+            w::Expr::Where(wh) => {
                 let mut call = self.keyword_call("where", self.keyword_span(span, "where"))?;
                 let cond_span = self.span(wh.condition.span);
-                let block_id = match &wh.condition.kind {
-                    w::ExprKind::Closure(c) => self.closure_block(c.params.as_ref(), &c.body, cond_span, "closure")?.0,
+                let block_id = match &wh.condition.expr {
+                    w::Expr::Closure(c) => self.closure_block(c.params.as_ref(), &c.body, cond_span, "closure")?.0,
                     _ => {
                         // A row condition: a closure taking `$it`.
                         self.ws.enter_scope();
@@ -474,23 +474,23 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                 call.add_positional(cond);
                 (Expr::Call(Box::new(call)), Type::Any)
             }
-            w::ExprKind::Const(_) => return self.unsupported("const", e.span),
-            w::ExprKind::Extern(_) => return self.unsupported("extern", e.span),
-            w::ExprKind::Alias(_) => return self.unsupported("alias", e.span),
-            w::ExprKind::Use(_) => return self.unsupported("use", e.span),
-            w::ExprKind::Module(_) => return self.unsupported("module", e.span),
-            w::ExprKind::Export(_) => return self.unsupported("export", e.span),
-            w::ExprKind::ExportEnv(_) => return self.unsupported("export-env", e.span),
-            w::ExprKind::EnvShorthand(_) => return self.unsupported("environment shorthand", e.span),
-            w::ExprKind::AttributeBlock(_) => return self.unsupported("attributes", e.span),
-            w::ExprKind::Garbage => return Err("cannot lower a garbage node".into()),
+            w::Expr::Const(_) => return self.unsupported("const", e.span),
+            w::Expr::Extern(_) => return self.unsupported("extern", e.span),
+            w::Expr::Alias(_) => return self.unsupported("alias", e.span),
+            w::Expr::Use(_) => return self.unsupported("use", e.span),
+            w::Expr::Module(_) => return self.unsupported("module", e.span),
+            w::Expr::Export(_) => return self.unsupported("export", e.span),
+            w::Expr::ExportEnv(_) => return self.unsupported("export-env", e.span),
+            w::Expr::EnvShorthand(_) => return self.unsupported("environment shorthand", e.span),
+            w::Expr::AttributeBlock(_) => return self.unsupported("attributes", e.span),
+            w::Expr::Garbage => return Err("cannot lower a garbage node".into()),
             _ => return self.unsupported("expression", e.span),
         };
         Ok(self.expression(expr, span, ty))
     }
 
-    fn list_items(&mut self, list: &w::Expr<'a>) -> LResult<Vec<Expression>> {
-        let w::ExprKind::List(items) = &list.kind else { return Err("table row must be a list".into()) };
+    fn list_items(&mut self, list: &w::Expression<'a>) -> LResult<Vec<Expression>> {
+        let w::Expr::List(items) = &list.expr else { return Err("table row must be a list".into()) };
         items
             .iter()
             .map(|item| match item {
@@ -510,7 +510,7 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                     w::PathMemberKind::String(s) => PathMember::string(
                         s.to_string(),
                         m.optional,
-                        if m.insensitive { Casing::Insensitive } else { Casing::Sensitive },
+                        if m.case_insensitive { Casing::Insensitive } else { Casing::Sensitive },
                         span,
                     ),
                 }
@@ -542,11 +542,11 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
         call.decl_id = decl_id;
         let mut positional_idx = 0usize;
         let mut end_of_options = false;
-        let mut args = c.args.iter().peekable();
+        let mut args = c.arguments.iter().peekable();
         while let Some(arg) = args.next() {
             match arg {
-                w::Arg::EndOfOptions(_) => end_of_options = true,
-                w::Arg::Flag(f) if !end_of_options => {
+                w::Argument::EndOfOptions(_) => end_of_options = true,
+                w::Argument::Named(f) if !end_of_options => {
                     let flag_span = self.span(f.span);
                     let flags: Vec<(Flag, usize)> = if f.long {
                         let flag = sig
@@ -570,7 +570,7 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                                 Some(self.expr(v)?)
                             } else {
                                 match args.next() {
-                                    Some(w::Arg::Positional(v)) => Some(self.expr_with_shape(v, flag.arg.as_ref())?),
+                                    Some(w::Argument::Positional(v)) => Some(self.expr_with_shape(v, flag.arg.as_ref())?),
                                     _ => return Err(format!("flag `--{}` needs a value", flag.long)),
                                 }
                             }
@@ -585,7 +585,7 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                         call.add_named((Spanned { item: flag.long.clone(), span: flag_span }, short, value));
                     }
                 }
-                w::Arg::Flag(f) => {
+                w::Argument::Named(f) => {
                     let e = self.expression(
                         Expr::String(format!("-{}{}", if f.long { "-" } else { "" }, f.name)),
                         self.span(f.span),
@@ -594,13 +594,13 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                     call.add_positional(e);
                     positional_idx += 1;
                 }
-                w::Arg::Positional(e) => {
+                w::Argument::Positional(e) => {
                     let shape = sig.get_positional(positional_idx).map(|p| p.shape.clone());
                     let e = self.expr_with_shape(e, shape.as_ref())?;
                     call.add_positional(e);
                     positional_idx += 1;
                 }
-                w::Arg::Spread { expr, .. } => {
+                w::Argument::Spread { expr, .. } => {
                     let e = self.expr(expr)?;
                     call.add_spread(e);
                 }
@@ -611,15 +611,15 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
 
     /// Lower an argument in the light of the shape its command declares: a
     /// `{ ... }` becomes a block rather than a closure for `Block` shapes.
-    fn expr_with_shape(&mut self, e: &w::Expr<'a>, shape: Option<&SyntaxShape>) -> LResult<Expression> {
+    fn expr_with_shape(&mut self, e: &w::Expression<'a>, shape: Option<&SyntaxShape>) -> LResult<Expression> {
         let span = self.span(e.span);
-        match (shape, &e.kind) {
-            (Some(SyntaxShape::Block), w::ExprKind::Closure(c)) if c.params.is_none() => {
+        match (shape, &e.expr) {
+            (Some(SyntaxShape::Block), w::Expr::Closure(c)) if c.params.is_none() => {
                 let id = self.scoped_block(&c.body, span, false)?;
                 Ok(self.expression(Expr::Block(id), span, Type::Block))
             }
             // `get name.0`: a bare word in a cell-path position is a cell path.
-            (Some(SyntaxShape::CellPath), w::ExprKind::String(s)) if s.quote == w::Quote::Bare => {
+            (Some(SyntaxShape::CellPath), w::Expr::String(s)) if s.quote == w::Quote::Bare => {
                 let mut members = Vec::new();
                 let mut offset = span.start;
                 for part in s.value.split('.') {
@@ -642,15 +642,15 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
         let head_span = self.span(c.head.span);
         let head = self.expression(Expr::String(c.head.name.to_string()), head_span, Type::String);
         let mut args = Vec::new();
-        for arg in &c.args {
+        for arg in &c.arguments {
             args.push(match arg {
-                w::Arg::Positional(e) => ExternalArgument::Regular(self.expr(e)?),
-                w::Arg::Flag(f) => {
+                w::Argument::Positional(e) => ExternalArgument::Regular(self.expr(e)?),
+                w::Argument::Named(f) => {
                     let text = f.span.slice(self.src).to_string();
                     ExternalArgument::Regular(self.expression(Expr::String(text), self.span(f.span), Type::String))
                 }
-                w::Arg::Spread { expr, .. } => ExternalArgument::Spread(self.expr(expr)?),
-                w::Arg::EndOfOptions(s) => {
+                w::Argument::Spread { expr, .. } => ExternalArgument::Spread(self.expr(expr)?),
+                w::Argument::EndOfOptions(s) => {
                     ExternalArgument::Regular(self.expression(Expr::String("--".into()), self.span(*s), Type::String))
                 }
             });
@@ -692,7 +692,7 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
             let pspan = self.span(p.span);
             let var_id = self.ws.add_variable_without_scope(pspan, Type::Any, false);
             params.push((format!("${}", p.name.item), var_id));
-            let shape = p.ty.as_ref().map_or(SyntaxShape::Any, |t| shape_of(&t.kind));
+            let shape = p.ty.as_ref().map_or(SyntaxShape::Any, |t| shape_of(&t.shape));
             let default_value = match &p.default {
                 Some(dflt) => {
                     let e = self.expr(dflt)?;
@@ -709,17 +709,17 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
                 default_value,
             };
             match &p.kind {
-                w::ParamKind::Positional { optional: false } => {
+                w::ParameterKind::Required => {
                     sig.required_positional.push(positional(p.name.item, shape, default_value))
                 }
-                w::ParamKind::Positional { optional: true } => {
+                w::ParameterKind::Optional => {
                     sig.optional_positional.push(positional(p.name.item, shape, default_value))
                 }
-                w::ParamKind::Rest => sig.rest_positional = Some(positional(p.name.item, shape, default_value)),
-                w::ParamKind::Flag { long, short } => sig.named.push(Flag {
+                w::ParameterKind::Rest => sig.rest_positional = Some(positional(p.name.item, shape, default_value)),
+                w::ParameterKind::Flag { long, short } => sig.named.push(Flag {
                     long: long.map(|l| l.item.to_string()).unwrap_or_default(),
                     short: short.map(|s| s.item),
-                    arg: p.ty.as_ref().map(|t| shape_of(&t.kind)),
+                    arg: p.ty.as_ref().map(|t| shape_of(&t.shape)),
                     required: false,
                     desc: String::new(),
                     completion: None,
@@ -817,25 +817,25 @@ impl<'ws, 'e, 'a> Lower<'ws, 'e, 'a> {
         Ok(self.expression(Expr::Call(Box::new(call)), span, Type::Any))
     }
 
-    fn pattern(&mut self, p: &w::Pattern<'a>) -> LResult<MatchPattern> {
+    fn pattern(&mut self, p: &w::MatchPattern<'a>) -> LResult<MatchPattern> {
         let span = self.span(p.span);
-        let pattern = match &p.kind {
-            w::PatternKind::Value(e) => Pattern::Expression(Box::new(self.expr(e)?)),
-            w::PatternKind::Variable(name) => Pattern::Variable(self.declare_var(name, span, false)),
-            w::PatternKind::Wildcard => Pattern::IgnoreValue,
-            w::PatternKind::List(items) => {
+        let pattern = match &p.pattern {
+            w::Pattern::Expression(e) => Pattern::Expression(Box::new(self.expr(e)?)),
+            w::Pattern::Variable(name) => Pattern::Variable(self.declare_var(name, span, false)),
+            w::Pattern::IgnoreValue => Pattern::IgnoreValue,
+            w::Pattern::List(items) => {
                 Pattern::List(items.iter().map(|i| self.pattern(i)).collect::<LResult<_>>()?)
             }
-            w::PatternKind::Record(fields) => {
+            w::Pattern::Record(fields) => {
                 let mut out = Vec::with_capacity(fields.len());
                 for (name, pat) in fields {
                     out.push((name.item.to_string(), self.pattern(pat)?));
                 }
                 Pattern::Record(out)
             }
-            w::PatternKind::Rest(Some(name)) => Pattern::Rest(self.declare_var(name.item, span, false)),
-            w::PatternKind::Rest(None) => Pattern::IgnoreRest,
-            w::PatternKind::Or(alts) => Pattern::Or(alts.iter().map(|a| self.pattern(a)).collect::<LResult<_>>()?),
+            w::Pattern::Rest(name) => Pattern::Rest(self.declare_var(name.item, span, false)),
+            w::Pattern::IgnoreRest => Pattern::IgnoreRest,
+            w::Pattern::Or(alts) => Pattern::Or(alts.iter().map(|a| self.pattern(a)).collect::<LResult<_>>()?),
         };
         Ok(MatchPattern { pattern, guard: None, span })
     }
@@ -852,26 +852,26 @@ fn compile(ws: &mut StateWorkingSet<'_>, block: &mut Block) -> LResult<()> {
     }
 }
 
-fn shape_of(kind: &w::TypeKind<'_>) -> SyntaxShape {
+fn shape_of(kind: &w::SyntaxShape<'_>) -> SyntaxShape {
     match kind {
-        w::TypeKind::Int => SyntaxShape::Int,
-        w::TypeKind::Float => SyntaxShape::Float,
-        w::TypeKind::Number => SyntaxShape::Number,
-        w::TypeKind::String => SyntaxShape::String,
-        w::TypeKind::Bool => SyntaxShape::Boolean,
-        w::TypeKind::Closure => SyntaxShape::Closure(None),
-        w::TypeKind::Record(_) => SyntaxShape::record(),
-        w::TypeKind::List(_) => SyntaxShape::List(Box::new(SyntaxShape::Any)),
-        w::TypeKind::Table(_) => SyntaxShape::table(),
-        w::TypeKind::Path => SyntaxShape::Filepath,
-        w::TypeKind::Glob => SyntaxShape::GlobPattern,
-        w::TypeKind::Duration => SyntaxShape::Duration,
-        w::TypeKind::Filesize => SyntaxShape::Filesize,
-        w::TypeKind::DateTime => SyntaxShape::DateTime,
-        w::TypeKind::Range => SyntaxShape::Range,
-        w::TypeKind::CellPath => SyntaxShape::CellPath,
-        w::TypeKind::Binary => SyntaxShape::Binary,
-        w::TypeKind::Nothing => SyntaxShape::Nothing,
+        w::SyntaxShape::Int => SyntaxShape::Int,
+        w::SyntaxShape::Float => SyntaxShape::Float,
+        w::SyntaxShape::Number => SyntaxShape::Number,
+        w::SyntaxShape::String => SyntaxShape::String,
+        w::SyntaxShape::Boolean => SyntaxShape::Boolean,
+        w::SyntaxShape::Closure => SyntaxShape::Closure(None),
+        w::SyntaxShape::Record(_) => SyntaxShape::record(),
+        w::SyntaxShape::List(_) => SyntaxShape::List(Box::new(SyntaxShape::Any)),
+        w::SyntaxShape::Table(_) => SyntaxShape::table(),
+        w::SyntaxShape::Filepath => SyntaxShape::Filepath,
+        w::SyntaxShape::GlobPattern => SyntaxShape::GlobPattern,
+        w::SyntaxShape::Duration => SyntaxShape::Duration,
+        w::SyntaxShape::Filesize => SyntaxShape::Filesize,
+        w::SyntaxShape::DateTime => SyntaxShape::DateTime,
+        w::SyntaxShape::Range => SyntaxShape::Range,
+        w::SyntaxShape::CellPath => SyntaxShape::CellPath,
+        w::SyntaxShape::Binary => SyntaxShape::Binary,
+        w::SyntaxShape::Nothing => SyntaxShape::Nothing,
         _ => SyntaxShape::Any,
     }
 }
@@ -921,14 +921,14 @@ fn operator(op: w::Operator) -> Operator {
     }
 }
 
-fn assign_op(op: AssignOp) -> Assignment {
+fn assign_op(op: AssignmentOperator) -> Assignment {
     match op {
-        AssignOp::Assign => Assignment::Assign,
-        AssignOp::AddAssign => Assignment::AddAssign,
-        AssignOp::SubAssign => Assignment::SubtractAssign,
-        AssignOp::MulAssign => Assignment::MultiplyAssign,
-        AssignOp::DivAssign => Assignment::DivideAssign,
-        AssignOp::ConcatAssign => Assignment::ConcatenateAssign,
+        AssignmentOperator::Assign => Assignment::Assign,
+        AssignmentOperator::AddAssign => Assignment::AddAssign,
+        AssignmentOperator::SubtractAssign => Assignment::SubtractAssign,
+        AssignmentOperator::MultiplyAssign => Assignment::MultiplyAssign,
+        AssignmentOperator::DivideAssign => Assignment::DivideAssign,
+        AssignmentOperator::ConcatenateAssign => Assignment::ConcatenateAssign,
     }
 }
 
